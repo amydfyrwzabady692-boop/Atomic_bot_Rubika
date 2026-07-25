@@ -117,7 +117,9 @@ class Database:
                     """INSERT INTO orders(
                          user_id,total_amount,discount_amount,payable_amount,
                          player_id,promo_code
-                       ) VALUES($1,$2,$3,$2-$3,$4,$5) RETURNING *""",
+                       ) VALUES(
+                         $1,$2::bigint,$3::bigint,$2::bigint-$3::bigint,$4,$5
+                       ) RETURNING *""",
                     user_id,
                     product["price"],
                     discount,

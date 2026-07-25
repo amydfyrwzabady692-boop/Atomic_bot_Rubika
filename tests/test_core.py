@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -94,6 +95,10 @@ class DatabaseTests(unittest.TestCase):
         state, data = asyncio.run(database.session("u1"))
         self.assertEqual(state, "gem_player_id")
         self.assertEqual(data, {})
+
+    def test_order_amount_parameters_have_explicit_sql_types(self):
+        source = inspect.getsource(Database.create_order)
+        self.assertIn("$2::bigint-$3::bigint", source)
 
 
 class KeyboardTests(unittest.TestCase):
