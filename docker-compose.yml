@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: atomic_rubika_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-atomic_rubika}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes:
+      - atomic_rubika_pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    networks: [rubika_net]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-atomic_rubika}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  bot:
+    build: .
+    container_name: atomic_rubika_bot
+    restart: unless-stopped
+    env_file: [.env]
+    init: true
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-atomic_rubika}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      WEB_PORT: "8081"
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [rubika_net]
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  rubika_net:
+
+volumes:
+  atomic_rubika_pgdata:
+
