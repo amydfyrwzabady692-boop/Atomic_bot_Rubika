@@ -81,6 +81,7 @@ https://rubika.atomicshop.ir/payment/callback
 /join_no USER_DB_ID
 /admin_add RUBIKA_ID TITLE
 /admin_delete RUBIKA_ID
+/admin_clear
 /setting card_number NUMBER
 /setting card_holder NAME
 /setting card_bank BANK
@@ -90,6 +91,10 @@ https://rubika.atomicshop.ir/payment/callback
 /channel_add CHAT_ID|TITLE|INVITE_URL
 /channel_delete ID
 ```
+
+افزودن، حذف و پاک‌سازی مدیران فرعی فقط توسط شناسه مالک اصلی
+`RUBIKA_ADMIN_ID` امکان‌پذیر است. دکمه پشتیبانی برای همه کاربران نمایش داده
+می‌شود، اما مشاهده و پاسخ به تیکت‌ها فقط از پنل مدیر قابل انجام است.
 
 مقادیر `kind` مجاز: `gem`، `sense_mobile`، `sense_pc` و `store`.
 

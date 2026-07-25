@@ -8,7 +8,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT))
 
 from database import Database
-from keyboards import admin_menu, main_menu
+from keyboards import admin_menu, link_button, main_menu
 from payment_safety import checked_amount, order_amounts, valid_card_number
 from router import Router
 from rubika_api import normalize_event
@@ -148,6 +148,24 @@ class KeyboardTests(unittest.TestCase):
         ]
         self.assertIn("💎 جم فری‌فایر", labels)
         self.assertIn("🛍 فروشگاه اکانت", labels)
+        self.assertIn("🎧 پشتیبانی", labels)
+
+    def test_link_button_uses_rubika_url_button_shape(self):
+        value = link_button(
+            "open-payment",
+            "🔗 باز کردن درگاه پرداخت",
+            "https://payment.example/authority",
+        )
+        self.assertEqual(value["type"], "Link")
+        self.assertEqual(
+            value["button_link"],
+            {
+                "type": "url",
+                "link_url": "https://payment.example/authority",
+            },
+        )
+        with self.assertRaises(ValueError):
+            link_button("bad", "bad", "javascript:alert(1)")
 
     def test_every_static_menu_button_has_a_router_action(self):
         source = inspect.getsource(Router)
@@ -159,6 +177,16 @@ class KeyboardTests(unittest.TestCase):
                         source,
                         f"missing route for {item['id']}",
                     )
+
+    def test_payment_copy_and_role_safety_text(self):
+        source = inspect.getsource(Router)
+        handle_source = inspect.getsource(Router.handle)
+        self.assertNotIn("VPN را خاموش", source)
+        self.assertNotIn("وی‌پی‌ان", source)
+        self.assertIn("مدیریت مدیران فقط در اختیار مالک اصلی", source)
+        self.assertIn('action.startswith("admin_")', handle_source)
+        self.assertIn("if is_admin:", handle_source)
+        self.assertEqual(Router.pretty_card("6219 8619-9783 1192"), "6219861997831192")
 
 
 class SchemaTests(unittest.TestCase):

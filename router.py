@@ -3,7 +3,7 @@ import os
 import re
 
 from database import Database
-from keyboards import admin_menu, inline, main_menu
+from keyboards import admin_menu, inline, link_button, main_menu
 from payment_safety import MIN_WALLET_CHARGE, checked_amount, valid_card_number
 from payments import Zarinpal
 from rubika_api import RubikaAPI, RubikaAPIError
@@ -558,17 +558,31 @@ class Router:
             await self.db.attach_authority(payment["id"], authority)
             await self.send(
                 event["chat_id"],
-                "✅ لینک پرداخت ساخته شد.\nابتدا VPN را خاموش کن و سپس لینک را باز کن:\n\n"
-                f"{url}\n\nاین لینک قابل کپی است.",
+                "✅ لینک پرداخت امن ساخته شد.\n"
+                f"مبلغ: {payment['amount']:,} تومان\n\n"
+                "برای ورود مستقیم به زرین‌پال، دکمه زیر را بزن:",
+                buttons=inline(
+                    [
+                        [
+                            link_button(
+                                f"gateway:{payment['id']}",
+                                "🔗 باز کردن درگاه پرداخت",
+                                url,
+                            )
+                        ]
+                    ]
+                ),
             )
             return
         await self.db.set_session(event["sender_id"], "card_receipt", {"payment_id": payment["id"]})
         await self.send(
             event["chat_id"],
             f"💳 مبلغ دقیق: {payment['amount']:,} تومان\n"
-            f"کارت: {self.pretty_card(number)}\n"
-            f"به نام: {holder}\nبانک: {bank}\n\nتصویر رسید را همین‌جا ارسال کن.",
+            f"به نام: {holder}\nبانک: {bank}\n\n"
+            "شماره کارت در پیام بعدی آمده؛ روی آن نگه دار و کپی کن.",
         )
+        await self.send(event["chat_id"], self.pretty_card(number))
+        await self.send(event["chat_id"], "پس از واریز، تصویر رسید را همین‌جا ارسال کن.")
 
     async def wallet(self, event, user):
         fresh = await self.db.pool.fetchrow("SELECT * FROM users WHERE id=$1", user["id"])
@@ -646,8 +660,20 @@ class Router:
             await self.db.attach_authority(payment["id"], authority)
             await self.send(
                 event["chat_id"],
-                "✅ لینک شارژ ساخته شد.\nVPN را خاموش کن و لینک را باز کن:\n\n"
-                f"{url}\n\nاین لینک قابل کپی است.",
+                "✅ لینک شارژ امن ساخته شد.\n"
+                f"مبلغ: {payment['amount']:,} تومان\n\n"
+                "برای ورود مستقیم به زرین‌پال، دکمه زیر را بزن:",
+                buttons=inline(
+                    [
+                        [
+                            link_button(
+                                f"wallet_gateway:{payment['id']}",
+                                "🔗 باز کردن درگاه پرداخت",
+                                url,
+                            )
+                        ]
+                    ]
+                ),
             )
             return
         if await self.db.setting("card_enabled", "1") != "1":
@@ -681,8 +707,12 @@ class Router:
         await self.send(
             event["chat_id"],
             f"💳 شارژ کیف پول: {amount:,} تومان\n"
-            f"کارت: {self.pretty_card(number)}\n"
             f"به نام: {holder or '—'}\nبانک: {bank or '—'}\n\n"
+            "شماره کارت در پیام بعدی آمده؛ روی آن نگه دار و کپی کن.",
+        )
+        await self.send(event["chat_id"], self.pretty_card(number))
+        await self.send(
+            event["chat_id"],
             "مبلغ را دقیق واریز کن و تصویر رسید را همین‌جا بفرست.",
         )
 
@@ -690,7 +720,9 @@ class Router:
     def pretty_card(number):
         digits = "".join(character for character in str(number) if character.isdigit())
         if len(digits) == 16:
-            return " ".join(digits[index : index + 4] for index in range(0, 16, 4))
+            # A standalone ASCII-only message is both LTR-safe and copies without
+            # invisible bidi control characters that banking apps may reject.
+            return digits
         return str(number)
 
     async def orders(self, event, user):
@@ -1174,6 +1206,37 @@ class Router:
                     else None
                 ),
             )
+        elif action == "admin_admins":
+            if event["sender_id"] != self.config.admin_id:
+                await self.send(chat, "⛔️ مدیریت مدیران فقط در اختیار مالک اصلی ربات است.")
+                return
+            rows = await self.db.pool.fetch(
+                """SELECT rubika_id,title,role,active,created_at
+                   FROM admins ORDER BY active DESC,created_at"""
+            )
+            active_rows = [row for row in rows if row["active"]]
+            lines = [
+                "👮 مدیریت مدیران",
+                f"مالک اصلی: {self.config.admin_id}",
+                "",
+                "مدیران فعال:",
+            ]
+            lines.extend(
+                f"• {row['rubika_id']} | {row['title'] or 'بدون عنوان'}"
+                for row in active_rows
+                if row["rubika_id"] != self.config.admin_id
+            )
+            if len(lines) == 4:
+                lines.append("• مدیر دیگری فعال نیست.")
+            lines.extend(
+                [
+                    "",
+                    "افزودن: /admin_add RUBIKA_ID TITLE",
+                    "حذف: /admin_delete RUBIKA_ID",
+                    "حذف همه مدیران فرعی: /admin_clear",
+                ]
+            )
+            await self.send(chat, "\n".join(lines))
         elif action == "admin_fx":
             rate = await usd_toman_rate(
                 await self.db.setting("usd_toman_rate", "")
@@ -1546,7 +1609,8 @@ class Router:
             "admin_search": "/user شناسه\n/order شماره",
             "admin_broadcast": "/broadcast متن پیام",
             "admin_codes": "/code_add gift|CODE|VALUE|MAX\n/code_add discount|CODE|PERCENT|MAX\n/code_delete ID",
-            "admin_settings": "/setting sales_enabled 1|0\n/setting welcome_text TEXT\n/setting help_text TEXT\n/setting support_prompt TEXT\n/admin_add ID TITLE\n/admin_delete ID\n/channel_add CHAT|TITLE|URL\n/channel_delete ID\n/department_add TITLE\n/department_delete ID",
+            "admin_settings": "/setting sales_enabled 1|0\n/setting welcome_text TEXT\n/setting help_text TEXT\n/setting support_prompt TEXT\n/channel_add CHAT|TITLE|URL\n/channel_delete ID\n/department_add TITLE\n/department_delete ID",
+            "admin_admins": "این بخش فقط برای مالک اصلی است.\n/admin_add ID TITLE\n/admin_delete ID\n/admin_clear",
         }
         return "راهنمای این بخش:\n" + docs.get(section, "دستور این بخش تعریف نشده است.")
 
@@ -1626,18 +1690,36 @@ class Router:
                     value = str(normalized_rate)
                 await self.db.set_setting(key, value)
             elif name == "/admin_add":
+                if admin_id != self.config.admin_id:
+                    raise ValueError("مدیریت مدیران فقط در اختیار مالک اصلی ربات است.")
                 rubika_id, _, title = args.partition(" ")
+                rubika_id, title = rubika_id.strip(), title.strip()
+                if not re.fullmatch(r"u0[A-Za-z0-9]{10,80}", rubika_id):
+                    raise ValueError("شناسه داخلی روبیکا معتبر نیست.")
+                if not title:
+                    raise ValueError("برای مدیر یک نام یا عنوان وارد کن.")
                 await self.db.pool.execute(
-                    """INSERT INTO admins(rubika_id,title) VALUES($1,$2)
-                       ON CONFLICT(rubika_id) DO UPDATE SET title=$2,active=true""",
+                    """INSERT INTO admins(rubika_id,title,role,active)
+                       VALUES($1,$2,'admin',true)
+                       ON CONFLICT(rubika_id) DO UPDATE
+                       SET title=$2,role='admin',active=true""",
                     rubika_id,
                     title,
                 )
             elif name == "/admin_delete":
+                if admin_id != self.config.admin_id:
+                    raise ValueError("مدیریت مدیران فقط در اختیار مالک اصلی ربات است.")
                 if args.strip() == self.config.admin_id:
                     raise ValueError("مدیر اصلی قابل حذف نیست.")
                 await self.db.pool.execute(
                     "UPDATE admins SET active=false WHERE rubika_id=$1", args.strip()
+                )
+            elif name == "/admin_clear":
+                if admin_id != self.config.admin_id:
+                    raise ValueError("مدیریت مدیران فقط در اختیار مالک اصلی ربات است.")
+                await self.db.pool.execute(
+                    "UPDATE admins SET active=false WHERE rubika_id<>$1",
+                    self.config.admin_id,
                 )
             elif name == "/product_add":
                 kind, title, price, stock, amount, sku, cost = args.split("|", 6)

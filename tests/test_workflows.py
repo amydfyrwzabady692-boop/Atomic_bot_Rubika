@@ -56,6 +56,68 @@ class ActionDatabase:
         return None
 
 
+class AdminPool:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        return "UPDATE 1"
+
+
+class AdminDatabase:
+    def __init__(self):
+        self.pool = AdminPool()
+
+    async def audit(self, *_args, **_kwargs):
+        return None
+
+
+class PaymentPool:
+    async def fetchrow(self, query, *_args):
+        if "FROM orders" in query:
+            return {
+                "id": 12,
+                "status": "pending",
+                "inventory_reserved": True,
+                "payable_amount": 200_000,
+            }
+        raise AssertionError(query)
+
+
+class PaymentDatabase:
+    def __init__(self, method):
+        self.pool = PaymentPool()
+        self.method = method
+        self.sessions = []
+        self.authorities = []
+
+    async def setting(self, key, default=""):
+        settings = {
+            "payments_enabled": "1",
+            "zarinpal_enabled": "1",
+            "card_enabled": "1",
+            "card_number": "6037991234567893",
+            "card_holder": "صاحب کارت",
+            "card_bank": "بانک",
+        }
+        return settings.get(key, default)
+
+    async def set_session(self, rubika_id, state="", data=None):
+        self.sessions.append((rubika_id, state, data))
+
+    async def create_payment(self, *_args):
+        return {"id": 31, "amount": 200_000, "provider": self.method}
+
+    async def attach_authority(self, payment_id, authority):
+        self.authorities.append((payment_id, authority))
+
+
+class PaymentGateway:
+    async def request(self, *_args):
+        return "A0001", "https://payment.example/A0001", None
+
+
 class AsyncContext:
     def __init__(self, value):
         self.value = value
@@ -211,6 +273,70 @@ class WorkflowTests(unittest.TestCase):
                 for query, _args in connection.executed
             )
         )
+
+    def test_delegated_admin_cannot_manage_other_admins(self):
+        database = AdminDatabase()
+        router, api = self.make_router(database)
+        asyncio.run(
+            router.admin_command(
+                {"chat_id": "delegated-chat", "sender_id": "u-delegated"},
+                "/admin_add u01234567890 Test",
+            )
+        )
+        self.assertFalse(database.pool.executed)
+        self.assertIn("فقط در اختیار مالک اصلی", api.messages[-1][1])
+
+    def test_owner_can_disable_all_delegated_admins(self):
+        database = AdminDatabase()
+        router, api = self.make_router(database)
+        asyncio.run(
+            router.admin_command(
+                {"chat_id": "admin-chat", "sender_id": "u-admin"},
+                "/admin_clear",
+            )
+        )
+        self.assertTrue(
+            any(
+                "UPDATE admins SET active=false" in query
+                and args == ("u-admin",)
+                for query, args in database.pool.executed
+            )
+        )
+        self.assertIn("موفقیت", api.messages[-1][1])
+
+    def test_gateway_payment_is_a_direct_link_button_without_vpn_text(self):
+        router, api = self.make_router(PaymentDatabase("gateway"))
+        router.zarinpal = PaymentGateway()
+        asyncio.run(
+            router.pay_order(
+                {"chat_id": "user-chat", "sender_id": "u-user"},
+                {"id": 3},
+                12,
+                "gateway",
+            )
+        )
+        message = api.messages[-1]
+        self.assertNotIn("VPN", message[1])
+        button = message[2]["inline_keypad"]["rows"][0]["buttons"][0]
+        self.assertEqual(button["type"], "Link")
+        self.assertEqual(
+            button["button_link"]["link_url"],
+            "https://payment.example/A0001",
+        )
+
+    def test_card_number_is_sent_as_an_exact_standalone_copy_message(self):
+        router, api = self.make_router(PaymentDatabase("card"))
+        asyncio.run(
+            router.pay_order(
+                {"chat_id": "user-chat", "sender_id": "u-user"},
+                {"id": 3},
+                12,
+                "card",
+            )
+        )
+        texts = [message[1] for message in api.messages]
+        self.assertIn("6037991234567893", texts)
+        self.assertFalse(any("کارت: 6037991234567893" in text for text in texts))
 
 
 if __name__ == "__main__":
