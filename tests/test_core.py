@@ -100,6 +100,11 @@ class DatabaseTests(unittest.TestCase):
         source = inspect.getsource(Database.create_order)
         self.assertIn("$2::bigint-$3::bigint", source)
 
+    def test_payment_parameters_have_explicit_sql_types(self):
+        source = inspect.getsource(Database.create_payment)
+        self.assertIn("$5::bigint", source)
+        self.assertIn("make_interval(mins => $6::int)", source)
+
 
 class KeyboardTests(unittest.TestCase):
     def test_main_keyboard_uses_official_shape(self):

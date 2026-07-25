@@ -237,7 +237,10 @@ class Database:
                 return await conn.fetchrow(
                     """INSERT INTO payments(
                          order_id,user_id,purpose,provider,amount,expires_at
-                       ) VALUES($1,$2,$3,$4,$5,now()+($6::text||' minutes')::interval)
+                       ) VALUES(
+                         $1::bigint,$2::bigint,$3::text,$4::text,$5::bigint,
+                         now()+make_interval(mins => $6::int)
+                       )
                        RETURNING *""",
                     order_id,
                     user_id,
