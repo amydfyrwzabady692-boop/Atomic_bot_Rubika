@@ -9,7 +9,7 @@ def g2_idempotency_key(order_id: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"atomic-rubika:order:{order_id}"))
 
 
-async def usd_toman_rate():
+async def usd_toman_rate(manual_rate=None):
     timeout = aiohttp.ClientTimeout(total=8)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -37,8 +37,10 @@ async def usd_toman_rate():
         ArithmeticError,
     ) as exc:
         try:
-            manual = int(os.getenv("USD_TOMAN_RATE", "").replace(",", ""))
-        except ValueError:
+            manual = int(
+                str(manual_rate or os.getenv("USD_TOMAN_RATE", "")).replace(",", "")
+            )
+        except (TypeError, ValueError):
             manual = 0
         if 10_000 <= manual <= 10_000_000:
             return {
@@ -91,10 +93,17 @@ class G2Bulk:
         )
         order = data.get("order") if isinstance(data.get("order"), dict) else {}
         if data.get("success") and order:
+            provider_order_id = str(order.get("order_id") or "").strip()
+            if not provider_order_id:
+                return {
+                    "ok": False,
+                    "idempotency_key": idem,
+                    "error": "تأمین‌کننده شناسه سفارش برنگرداند.",
+                }
             return {
                 "ok": True,
                 "idempotency_key": idem,
-                "provider_order_id": str(order.get("order_id") or ""),
+                "provider_order_id": provider_order_id,
                 "status": str(order.get("status") or "PENDING").upper(),
                 "cost_usd": order.get("price"),
                 "player_name": order.get("player_name") or "",

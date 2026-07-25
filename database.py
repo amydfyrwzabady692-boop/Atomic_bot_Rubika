@@ -89,6 +89,64 @@ class Database:
     async def create_order(self, user_id: int, product_id: int, player_id=""):
         async with self.pool.acquire() as conn:
             async with conn.transaction(isolation="serializable"):
+                await conn.fetchval(
+                    "SELECT id FROM users WHERE id=$1 FOR UPDATE",
+                    user_id,
+                )
+                old_orders = await conn.fetch(
+                    """SELECT id,wallet_paid FROM orders
+                       WHERE user_id=$1 AND status='pending' FOR UPDATE""",
+                    user_id,
+                )
+                for old in old_orders:
+                    if old["wallet_paid"]:
+                        reference = f"cancel-order:{old['id']}:wallet-refund"
+                        inserted = await conn.fetchval(
+                            """INSERT INTO wallet_ledger(
+                                 user_id,amount,entry_type,reference
+                               ) VALUES($1,$2,'order_refund',$3)
+                               ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                            user_id,
+                            old["wallet_paid"],
+                            reference,
+                        )
+                        if inserted:
+                            await conn.execute(
+                                "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                                old["wallet_paid"],
+                                user_id,
+                            )
+                    await conn.execute(
+                        """UPDATE products p SET stock=stock+i.quantity
+                           FROM order_items i
+                           WHERE i.order_id=$1 AND i.product_id=p.id
+                             AND EXISTS (
+                               SELECT 1 FROM orders o WHERE o.id=$1
+                               AND o.inventory_reserved
+                             )""",
+                        old["id"],
+                    )
+                if old_orders:
+                    old_ids = [row["id"] for row in old_orders]
+                    await conn.execute(
+                        """UPDATE receipts SET status='rejected',reviewed_at=now()
+                           WHERE payment_id IN (
+                             SELECT id FROM payments WHERE order_id=ANY($1::bigint[])
+                           ) AND status='pending'""",
+                        old_ids,
+                    )
+                    await conn.execute(
+                        """UPDATE payments SET status='cancelled'
+                           WHERE order_id=ANY($1::bigint[]) AND status='pending'""",
+                        old_ids,
+                    )
+                    await conn.execute(
+                        """UPDATE orders SET status='cancelled',
+                           inventory_reserved=false,wallet_paid=0,
+                           payable_amount=total_amount-discount_amount
+                           WHERE id=ANY($1::bigint[])""",
+                        old_ids,
+                    )
                 product = await conn.fetchrow(
                     "SELECT * FROM products WHERE id=$1 AND active AND stock>0 FOR UPDATE",
                     product_id,
@@ -116,9 +174,9 @@ class Database:
                 order = await conn.fetchrow(
                     """INSERT INTO orders(
                          user_id,total_amount,discount_amount,payable_amount,
-                         player_id,promo_code
+                         player_id,promo_code,inventory_reserved
                        ) VALUES(
-                         $1,$2::bigint,$3::bigint,$2::bigint-$3::bigint,$4,$5
+                         $1,$2::bigint,$3::bigint,$2::bigint-$3::bigint,$4,$5,true
                        ) RETURNING *""",
                     user_id,
                     product["price"],
@@ -134,6 +192,13 @@ class Database:
                     product["title"],
                     product["price"],
                 )
+                changed = await conn.execute(
+                    """UPDATE products SET stock=stock-1
+                       WHERE id=$1 AND active AND stock>0""",
+                    product_id,
+                )
+                if not changed.endswith("1"):
+                    raise ValueError("موجودی محصول تمام شده است.")
                 if pending_code:
                     if discount:
                         await conn.execute(
@@ -156,6 +221,10 @@ class Database:
         code_value = raw_code.strip().upper()
         async with self.pool.acquire() as conn:
             async with conn.transaction(isolation="serializable"):
+                await conn.fetchval(
+                    "SELECT id FROM users WHERE id=$1 FOR UPDATE",
+                    user_id,
+                )
                 code = await conn.fetchrow(
                     """SELECT * FROM promo_codes WHERE code=$1 FOR UPDATE""",
                     code_value,
@@ -215,12 +284,19 @@ class Database:
             async with conn.transaction(isolation="serializable"):
                 if order_id is not None:
                     order = await conn.fetchrow(
-                        "SELECT status FROM orders WHERE id=$1 AND user_id=$2 FOR UPDATE",
+                        """SELECT status,payable_amount,inventory_reserved
+                           FROM orders WHERE id=$1 AND user_id=$2 FOR UPDATE""",
                         order_id,
                         user_id,
                     )
-                    if not order or order["status"] != "pending":
+                    if (
+                        not order
+                        or order["status"] != "pending"
+                        or not order["inventory_reserved"]
+                        or order["payable_amount"] <= 0
+                    ):
                         raise ValueError("سفارش قابل پرداخت نیست.")
+                    amount = int(order["payable_amount"])
                     await conn.execute(
                         """UPDATE receipts SET status='rejected',reviewed_at=now()
                            WHERE payment_id IN (
@@ -264,16 +340,11 @@ class Database:
         async with self.pool.acquire() as conn:
             async with conn.transaction(isolation="serializable"):
                 payment = await conn.fetchrow(
-                    "SELECT * FROM payments WHERE authority=$1 FOR UPDATE", authority
+                    "SELECT * FROM payments WHERE authority=$1",
+                    authority,
                 )
                 if not payment:
                     raise ValueError("پرداخت پیدا نشد.")
-                if payment["status"] == "verified":
-                    return payment, False
-                if payment["status"] != "pending" or payment["expires_at"] < await conn.fetchval(
-                    "SELECT now()"
-                ):
-                    raise ValueError("پرداخت منقضی یا نامعتبر است.")
                 if payment["purpose"] == "order":
                     order_status = await conn.fetchval(
                         "SELECT status FROM orders WHERE id=$1 FOR UPDATE",
@@ -281,6 +352,17 @@ class Database:
                     )
                     if order_status != "pending":
                         raise ValueError("سفارش قبلاً پرداخت یا بسته شده است.")
+                payment = await conn.fetchrow(
+                    "SELECT * FROM payments WHERE id=$1 FOR UPDATE",
+                    payment["id"],
+                )
+                if payment["status"] == "verified":
+                    return payment, False
+                if (
+                    payment["provider"] != "gateway"
+                    or payment["status"] not in {"pending", "expired", "cancelled"}
+                ):
+                    raise ValueError("پرداخت نامعتبر است.")
                 await conn.execute(
                     """UPDATE payments SET status='verified',ref_id=$1,verified_at=now()
                        WHERE id=$2""",
@@ -305,10 +387,32 @@ class Database:
                         )
                 else:
                     await conn.execute(
-                        """UPDATE orders SET status='paid',paid_at=now()
-                           WHERE id=$1 AND status='pending'""",
+                        """UPDATE receipts SET status='rejected',reviewed_at=now()
+                           WHERE payment_id IN (
+                             SELECT id FROM payments
+                             WHERE order_id=$1 AND id<>$2
+                           ) AND status='pending'""",
+                        payment["order_id"],
+                        payment["id"],
+                    )
+                    await conn.execute(
+                        """UPDATE payments SET status='cancelled'
+                           WHERE order_id=$1 AND id<>$2 AND status='pending'""",
+                        payment["order_id"],
+                        payment["id"],
+                    )
+                    changed = await conn.execute(
+                        """UPDATE orders SET status='paid',payable_amount=0,
+                           inventory_reserved=false,
+                           payment_method=CASE WHEN wallet_paid>0
+                             THEN 'wallet+gateway' ELSE 'gateway' END,
+                           paid_at=now()
+                           WHERE id=$1 AND status='pending'
+                             AND inventory_reserved""",
                         payment["order_id"],
                     )
+                    if not changed.endswith("1"):
+                        raise ValueError("سفارش دیگر قابل پرداخت نیست.")
                 return payment, True
 
     async def wallet_pay(self, user_id: int, order_id: int):
@@ -320,12 +424,25 @@ class Database:
                     order_id,
                     user_id,
                 )
-                if not order or order["status"] != "pending":
+                if (
+                    not order
+                    or order["status"] != "pending"
+                    or not order["inventory_reserved"]
+                ):
                     raise ValueError("سفارش قابل پرداخت نیست.")
-                amount = order["payable_amount"]
-                if user["balance"] < amount:
-                    raise ValueError("موجودی کیف پول کافی نیست.")
-                reference = f"order:{order_id}:wallet"
+                if order["wallet_paid"] > 0:
+                    raise ValueError("سهم کیف پول قبلاً برای این سفارش اعمال شده است.")
+                amount = min(int(user["balance"]), int(order["payable_amount"]))
+                if amount <= 0:
+                    raise ValueError("موجودی کیف پول صفر است.")
+                attempt = await conn.fetchval(
+                    """SELECT count(*)+1 FROM wallet_ledger
+                       WHERE user_id=$1 AND entry_type='order_payment'
+                         AND reference LIKE $2""",
+                    user_id,
+                    f"order:{order_id}:wallet:%",
+                )
+                reference = f"order:{order_id}:wallet:{attempt}"
                 await conn.execute(
                     """INSERT INTO wallet_ledger(user_id,amount,entry_type,reference)
                        VALUES($1,$2,'order_payment',$3)""",
@@ -336,13 +453,23 @@ class Database:
                 await conn.execute(
                     "UPDATE users SET balance=balance-$1 WHERE id=$2", amount, user_id
                 )
-                await conn.execute(
-                    """UPDATE orders SET status='paid',wallet_paid=$1,
-                       payable_amount=0,payment_method='wallet',paid_at=now()
-                       WHERE id=$2""",
-                    amount,
-                    order_id,
-                )
+                remaining = int(order["payable_amount"]) - amount
+                if remaining == 0:
+                    await conn.execute(
+                        """UPDATE orders SET status='paid',wallet_paid=$1,
+                           payable_amount=0,payment_method='wallet',paid_at=now(),
+                           inventory_reserved=false WHERE id=$2""",
+                        amount,
+                        order_id,
+                    )
+                else:
+                    await conn.execute(
+                        """UPDATE orders SET wallet_paid=$1,payable_amount=$2,
+                           payment_method='wallet+pending' WHERE id=$3""",
+                        amount,
+                        remaining,
+                        order_id,
+                    )
                 await conn.execute(
                     """UPDATE payments SET status='cancelled'
                        WHERE order_id=$1 AND status='pending'""",
@@ -356,7 +483,175 @@ class Database:
                        ) AND status='pending'""",
                     order_id,
                 )
-                return amount
+                return {
+                    "used": amount,
+                    "remaining": remaining,
+                    "balance": int(user["balance"]) - amount,
+                    "paid": remaining == 0,
+                }
+
+    async def cancel_order(self, user_id: int, order_id: int):
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="serializable"):
+                order = await conn.fetchrow(
+                    """SELECT * FROM orders
+                       WHERE id=$1 AND user_id=$2 FOR UPDATE""",
+                    order_id,
+                    user_id,
+                )
+                if not order or order["status"] != "pending":
+                    raise ValueError("سفارش قابل لغو نیست.")
+                refunded = int(order["wallet_paid"])
+                if refunded:
+                    reference = f"cancel-order:{order_id}:wallet-refund"
+                    inserted = await conn.fetchval(
+                        """INSERT INTO wallet_ledger(
+                             user_id,amount,entry_type,reference
+                           ) VALUES($1,$2,'order_refund',$3)
+                           ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                        user_id,
+                        refunded,
+                        reference,
+                    )
+                    if inserted:
+                        await conn.execute(
+                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                            refunded,
+                            user_id,
+                        )
+                if order["inventory_reserved"]:
+                    await conn.execute(
+                        """UPDATE products p SET stock=stock+i.quantity
+                           FROM order_items i
+                           WHERE i.order_id=$1 AND i.product_id=p.id""",
+                        order_id,
+                    )
+                await conn.execute(
+                    """UPDATE receipts SET status='rejected',reviewed_at=now()
+                       WHERE payment_id IN (
+                         SELECT id FROM payments WHERE order_id=$1
+                       ) AND status='pending'""",
+                    order_id,
+                )
+                await conn.execute(
+                    """UPDATE payments SET status='cancelled'
+                       WHERE order_id=$1 AND status='pending'""",
+                    order_id,
+                )
+                await conn.execute(
+                    """UPDATE orders SET status='cancelled',wallet_paid=0,
+                       payable_amount=total_amount-discount_amount,
+                       inventory_reserved=false WHERE id=$1""",
+                    order_id,
+                )
+                return refunded
+
+    async def submit_receipt(
+        self,
+        *,
+        payment_id: int,
+        user_id: int,
+        source_chat_id: str,
+        source_message_id: str,
+        file_id: str,
+    ):
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="serializable"):
+                payment = await conn.fetchrow(
+                    """SELECT p.*,o.status order_status
+                       FROM payments p
+                       LEFT JOIN orders o ON o.id=p.order_id
+                       WHERE p.id=$1 AND p.user_id=$2 FOR UPDATE OF p""",
+                    payment_id,
+                    user_id,
+                )
+                now = await conn.fetchval("SELECT now()")
+                if (
+                    not payment
+                    or payment["provider"] != "card"
+                    or payment["status"] != "pending"
+                    or payment["expires_at"] <= now
+                    or (
+                        payment["purpose"] == "order"
+                        and payment["order_status"] != "pending"
+                    )
+                ):
+                    raise ValueError("مهلت پرداخت تمام شده یا تراکنش معتبر نیست.")
+                return await conn.fetchrow(
+                    """INSERT INTO receipts(
+                         payment_id,user_id,source_chat_id,source_message_id,file_id
+                       ) VALUES($1,$2,$3,$4,$5)
+                       ON CONFLICT(payment_id) DO NOTHING RETURNING id""",
+                    payment_id,
+                    user_id,
+                    source_chat_id,
+                    source_message_id,
+                    file_id,
+                )
+
+    async def expire_stale_orders(self):
+        expired = []
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="serializable"):
+                rows = await conn.fetch(
+                    """SELECT o.*,u.chat_id FROM orders o
+                       JOIN users u ON u.id=o.user_id
+                       WHERE o.status='pending'
+                         AND o.created_at<now()-interval '1 hour'
+                       FOR UPDATE OF o"""
+                )
+                for order in rows:
+                    refunded = int(order["wallet_paid"])
+                    if refunded:
+                        reference = f"expire-order:{order['id']}:wallet-refund"
+                        inserted = await conn.fetchval(
+                            """INSERT INTO wallet_ledger(
+                                 user_id,amount,entry_type,reference
+                               ) VALUES($1,$2,'order_refund',$3)
+                               ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                            order["user_id"],
+                            refunded,
+                            reference,
+                        )
+                        if inserted:
+                            await conn.execute(
+                                "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                                refunded,
+                                order["user_id"],
+                            )
+                    if order["inventory_reserved"]:
+                        await conn.execute(
+                            """UPDATE products p SET stock=stock+i.quantity
+                               FROM order_items i
+                               WHERE i.order_id=$1 AND i.product_id=p.id""",
+                            order["id"],
+                        )
+                    await conn.execute(
+                        """UPDATE receipts SET status='rejected',reviewed_at=now()
+                           WHERE payment_id IN (
+                             SELECT id FROM payments WHERE order_id=$1
+                           ) AND status='pending'""",
+                        order["id"],
+                    )
+                    await conn.execute(
+                        """UPDATE payments SET status='expired'
+                           WHERE order_id=$1 AND status='pending'""",
+                        order["id"],
+                    )
+                    await conn.execute(
+                        """UPDATE orders SET status='expired',wallet_paid=0,
+                           payable_amount=total_amount-discount_amount,
+                           inventory_reserved=false WHERE id=$1""",
+                        order["id"],
+                    )
+                    expired.append(
+                        {
+                            "id": order["id"],
+                            "chat_id": order["chat_id"],
+                            "refunded": refunded,
+                        }
+                    )
+        return expired
 
     async def stats(self):
         return await self.pool.fetchrow(
@@ -366,7 +661,12 @@ class Database:
               (SELECT coalesce(sum(balance),0) FROM users) balances,
               (SELECT count(*) FROM orders WHERE paid_at IS NOT NULL) sales,
               (SELECT coalesce(sum(total_amount-discount_amount),0)
-                 FROM orders WHERE paid_at IS NOT NULL) revenue"""
+                 FROM orders WHERE paid_at IS NOT NULL) revenue,
+              (SELECT count(*) FROM users u
+                 WHERE u.balance<>coalesce((
+                   SELECT sum(l.amount) FROM wallet_ledger l
+                   WHERE l.user_id=u.id
+                 ),0)) wallet_mismatches"""
         )
 
     async def audit(self, admin_id, action, target="", details=""):

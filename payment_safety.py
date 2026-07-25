@@ -26,3 +26,14 @@ def order_amounts(total, discount=0, wallet_paid=0):
     if wallet_paid < 0 or wallet_paid > net:
         raise ValueError("برداشت کیف پول نامعتبر است.")
     return net, net - wallet_paid
+
+
+def valid_card_number(value) -> bool:
+    digits = "".join(character for character in str(value or "") if character.isdigit())
+    if len(digits) != 16 or len(set(digits)) == 1:
+        return False
+    checksum = 0
+    for index, character in enumerate(digits):
+        number = int(character) * (2 if index % 2 == 0 else 1)
+        checksum += number - 9 if number > 9 else number
+    return checksum % 10 == 0

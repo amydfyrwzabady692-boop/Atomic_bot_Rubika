@@ -8,8 +8,8 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT))
 
 from database import Database
-from keyboards import main_menu
-from payment_safety import checked_amount, order_amounts
+from keyboards import admin_menu, main_menu
+from payment_safety import checked_amount, order_amounts, valid_card_number
 from router import Router
 from rubika_api import normalize_event
 from supplier import g2_idempotency_key
@@ -73,6 +73,11 @@ class FinancialTests(unittest.TestCase):
         self.assertEqual(first, g2_idempotency_key(42))
         self.assertEqual(len(first), 36)
 
+    def test_card_number_checksum(self):
+        self.assertTrue(valid_card_number("6037 9912 3456 7893"))
+        self.assertFalse(valid_card_number("6037991234567890"))
+        self.assertFalse(valid_card_number("1111111111111111"))
+
 
 class DatabaseTests(unittest.TestCase):
     def test_session_decodes_json_text(self):
@@ -108,17 +113,23 @@ class DatabaseTests(unittest.TestCase):
 
     def test_card_settings_fall_back_to_environment(self):
         source = inspect.getsource(Router.pay_order)
-        self.assertIn('or os.getenv(\n            "CARD_TRANSFER_NUMBER"', source)
+        self.assertIn('os.getenv(\n                "CARD_TRANSFER_NUMBER"', source)
 
     def test_receipt_review_has_buttons_and_safe_command_validation(self):
         handle_source = inspect.getsource(Router.handle)
         command_source = inspect.getsource(Router.admin_command)
         message_source = inspect.getsource(Router.handle_state)
-        self.assertIn('action.startswith(("receipt_ok:", "receipt_no:"))', handle_source)
+        admin_source = inspect.getsource(Router.handle_admin_action)
+        self.assertIn('"receipt_review:"', handle_source)
         self.assertIn("✅ تأیید رسید", message_source)
         self.assertIn("❌ رد رسید", message_source)
+        self.assertIn("receipt_apply:", admin_source)
         self.assertIn("if not receipt_arg.isdigit()", command_source)
         self.assertIn("شماره رسید را وارد کن", command_source)
+
+    def test_inline_buttons_are_not_permanently_deduplicated(self):
+        source = inspect.getsource(Router.handle)
+        self.assertIn('not event["event_id"].startswith("inline:")', source)
 
 
 class KeyboardTests(unittest.TestCase):
@@ -138,6 +149,17 @@ class KeyboardTests(unittest.TestCase):
         self.assertIn("💎 جم فری‌فایر", labels)
         self.assertIn("🛍 فروشگاه اکانت", labels)
 
+    def test_every_static_menu_button_has_a_router_action(self):
+        source = inspect.getsource(Router)
+        for menu in (main_menu(), admin_menu()):
+            for row in menu["rows"]:
+                for item in row["buttons"]:
+                    self.assertIn(
+                        f'"{item["id"]}"',
+                        source,
+                        f"missing route for {item['id']}",
+                    )
+
 
 class SchemaTests(unittest.TestCase):
     def test_financial_uniqueness_and_checks_present(self):
@@ -149,6 +171,9 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("order_id BIGINT UNIQUE", schema)
         self.assertIn("UNIQUE(code_id,user_id)", schema)
         self.assertIn("pending_discounts", schema)
+        self.assertIn("inventory_reserved", schema)
+        self.assertIn("next_retry_at", schema)
+        self.assertIn("payments_enabled", schema)
         self.assertIn("telegram_catalog_20260726", schema)
         self.assertIn("('gem','بسته ۱۱۰ جمی',110,'110',200000,9999)", schema)
 

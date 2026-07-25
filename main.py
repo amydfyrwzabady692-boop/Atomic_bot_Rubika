@@ -7,6 +7,7 @@ from aiohttp import web
 
 from config import Settings
 from database import Database
+from keyboards import inline
 from payments import Zarinpal
 from router import Router
 from rubika_api import RubikaAPI, normalize_event
@@ -118,6 +119,65 @@ class Application:
     async def fulfillment_loop(self):
         while True:
             try:
+                manual = await self.db.pool.fetchrow(
+                    """SELECT o.id,u.chat_id,u.rubika_id,p.title,p.kind,
+                              f.id fulfillment_id
+                       FROM orders o
+                       JOIN order_items i ON i.order_id=o.id
+                       JOIN products p ON p.id=i.product_id
+                       JOIN users u ON u.id=o.user_id
+                       LEFT JOIN fulfillments f ON f.order_id=o.id
+                       WHERE o.status='paid' AND p.kind<>'gem'
+                         AND (f.id IS NULL OR f.status='WAITING_NOTIFY')
+                       ORDER BY o.id LIMIT 1"""
+                )
+                if manual:
+                    if manual["fulfillment_id"]:
+                        claimed = manual["fulfillment_id"]
+                    else:
+                        claimed = await self.db.pool.fetchval(
+                            """INSERT INTO fulfillments(
+                                 order_id,provider,idempotency_key,status,attempts
+                               ) VALUES($1,'manual',$2,'WAITING_NOTIFY',1)
+                               ON CONFLICT(order_id) DO NOTHING RETURNING id""",
+                            manual["id"],
+                            f"manual:{manual['id']}",
+                        )
+                    if claimed:
+                        await self.api.send_message(
+                            self.config.admin_chat_id,
+                            f"📦 سفارش آماده تحویل #{manual['id']}\n"
+                            f"محصول: {manual['title']}\n"
+                            f"نوع: {manual['kind']}\n"
+                            f"کاربر: {manual['rubika_id']}\n\n"
+                            "پس از ارسال پک/محصول برای کاربر، تکمیل را بزن.",
+                            inline_keypad=inline(
+                                [
+                                    [
+                                        (
+                                            f"order_complete:{manual['id']}",
+                                            "✅ تحویل شد",
+                                        )
+                                    ]
+                                ]
+                            ),
+                        )
+                        await self.api.send_message(
+                            manual["chat_id"],
+                            f"⏳ پرداخت سفارش #{manual['id']} تأیید شد و "
+                            "برای تحویل به پشتیبانی ارسال شد.",
+                        )
+                        await self.db.pool.execute(
+                            """UPDATE fulfillments SET status='WAITING_ADMIN',
+                               updated_at=now() WHERE order_id=$1""",
+                            manual["id"],
+                        )
+                        await self.db.pool.execute(
+                            """UPDATE orders SET status='processing'
+                               WHERE id=$1 AND status='paid'""",
+                            manual["id"],
+                        )
+                    continue
                 pending = await self.db.pool.fetchrow(
                     """SELECT f.order_id,f.provider_order_id,u.chat_id
                        FROM fulfillments f
@@ -158,28 +218,44 @@ class Application:
                     await asyncio.sleep(3)
                     continue
                 row = await self.db.pool.fetchrow(
-                    """SELECT o.id,o.player_id,o.total_amount,p.supplier_sku,
-                              p.supplier_cost_usd,u.chat_id
+                    """SELECT o.id,o.player_id,
+                              o.total_amount-o.discount_amount sale_toman,
+                              p.supplier_sku,p.supplier_cost_usd,u.chat_id,
+                              f.id fulfillment_id,f.attempts
                        FROM orders o
                        JOIN order_items i ON i.order_id=o.id
                        JOIN products p ON p.id=i.product_id
                        JOIN users u ON u.id=o.user_id
                        LEFT JOIN fulfillments f ON f.order_id=o.id
-                       WHERE o.status='paid' AND p.kind='gem' AND f.id IS NULL
+                       WHERE o.status='paid' AND p.kind='gem'
+                         AND (
+                           f.id IS NULL OR (
+                             f.status='RETRY'
+                             AND (f.next_retry_at IS NULL OR f.next_retry_at<=now())
+                           )
+                         )
                        ORDER BY o.id LIMIT 1"""
                 )
                 if not row:
                     await asyncio.sleep(5)
                     continue
                 idem = hashlib.sha256(f"atomic-rubika:{row['id']}".encode()).hexdigest()
-                claimed = await self.db.pool.fetchval(
-                    """INSERT INTO fulfillments(
-                         order_id,provider,idempotency_key,status
-                       ) VALUES($1,'g2bulk',$2,'processing')
-                       ON CONFLICT(order_id) DO NOTHING RETURNING id""",
-                    row["id"],
-                    idem,
-                )
+                if row["fulfillment_id"]:
+                    claimed = await self.db.pool.fetchval(
+                        """UPDATE fulfillments SET status='PROCESSING',
+                           attempts=attempts+1,updated_at=now()
+                           WHERE id=$1 AND status='RETRY' RETURNING id""",
+                        row["fulfillment_id"],
+                    )
+                else:
+                    claimed = await self.db.pool.fetchval(
+                        """INSERT INTO fulfillments(
+                             order_id,provider,idempotency_key,status,attempts
+                           ) VALUES($1,'g2bulk',$2,'PROCESSING',1)
+                           ON CONFLICT(order_id) DO NOTHING RETURNING id""",
+                        row["id"],
+                        idem,
+                    )
                 if not claimed:
                     continue
                 result = await self.g2.order(row["supplier_sku"], row["player_id"], row["id"])
@@ -202,7 +278,9 @@ class Application:
                                 result["player_name"],
                                 row["id"],
                             )
-                    rate = await usd_toman_rate()
+                    rate = await usd_toman_rate(
+                        await self.db.setting("usd_toman_rate", "")
+                    )
                     cost_usd = result.get("cost_usd") or row["supplier_cost_usd"]
                     if rate.get("ok") and cost_usd:
                         cost_toman = round(float(cost_usd) * rate["rate"])
@@ -213,11 +291,11 @@ class Application:
                                ) VALUES($1,$2,$3,$4,$5,$6,$7)
                                ON CONFLICT(order_id) DO NOTHING""",
                             row["id"],
-                            row["total_amount"],
+                            row["sale_toman"],
                             float(cost_usd),
                             rate["rate"],
                             cost_toman,
-                            row["total_amount"] - cost_toman,
+                            row["sale_toman"] - cost_toman,
                             rate["source"],
                         )
                     if provider_status == "COMPLETED":
@@ -231,16 +309,29 @@ class Application:
                             f"⏳ سفارش #{row['id']} برای تحویل ارسال شد.",
                         )
                 else:
+                    attempts = int(row["attempts"] or 0) + 1
+                    retrying = attempts < 5
                     await self.db.pool.execute(
-                        """UPDATE fulfillments SET status='failed',error=$1,
-                           updated_at=now() WHERE order_id=$2""",
+                        """UPDATE fulfillments SET status=$1,error=$2,
+                           next_retry_at=CASE WHEN $1='RETRY'
+                             THEN now()+make_interval(mins => LEAST(attempts*2,30))
+                             ELSE NULL END,
+                           updated_at=now() WHERE order_id=$3""",
+                        "RETRY" if retrying else "FAILED",
                         result.get("error", "")[:1000],
                         row["id"],
                     )
-                    await self.api.send_message(
-                        self.config.admin_chat_id,
-                        f"⚠️ تحویل سفارش #{row['id']} ناموفق بود:\n{result.get('error')}",
-                    )
+                    if not retrying:
+                        await self.db.pool.execute(
+                            """UPDATE orders SET status='delivery_failed'
+                               WHERE id=$1 AND status='paid'""",
+                            row["id"],
+                        )
+                        await self.api.send_message(
+                            self.config.admin_chat_id,
+                            f"⚠️ تحویل سفارش #{row['id']} پس از ۵ تلاش ناموفق بود:\n"
+                            f"{result.get('error')}",
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -250,6 +341,7 @@ class Application:
     async def cleanup_loop(self):
         while True:
             try:
+                await self.reconcile_gateway_payments()
                 await self.db.pool.execute(
                     "DELETE FROM processed_events WHERE created_at<now()-interval '7 days'"
                 )
@@ -262,12 +354,74 @@ class Application:
                        FROM payments p WHERE p.id=r.payment_id
                        AND p.status='expired' AND r.status='pending'"""
                 )
-                await asyncio.sleep(8 * 60 * 60)
+                expired_orders = await self.db.expire_stale_orders()
+                for order in expired_orders:
+                    text = f"⏳ مهلت سفارش #{order['id']} تمام شد و سفارش لغو شد."
+                    if order["refunded"]:
+                        text += (
+                            f"\n💰 {order['refunded']:,} تومان به کیف پولت برگشت."
+                        )
+                    await self.api.send_message(order["chat_id"], text)
+                await self.db.pool.execute(
+                    """UPDATE sessions SET state='',data='{}'::jsonb,updated_at=now()
+                       WHERE state<>'' AND updated_at<now()-interval '2 hours'"""
+                )
+                await asyncio.sleep(5 * 60)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Cleanup failed")
                 await asyncio.sleep(60)
+
+    async def reconcile_gateway_payments(self):
+        rows = await self.db.pool.fetch(
+            """SELECT id,authority,amount FROM payments
+               WHERE provider='gateway' AND authority IS NOT NULL
+                 AND status IN ('pending','expired','cancelled')
+                 AND expires_at<now()
+                 AND created_at>now()-interval '24 hours'
+                 AND verify_attempts<6
+                 AND (
+                   last_checked_at IS NULL
+                   OR last_checked_at<now()-interval '30 minutes'
+                 )
+               ORDER BY id LIMIT 100"""
+        )
+        for row in rows:
+            await self.db.pool.execute(
+                """UPDATE payments SET verify_attempts=verify_attempts+1,
+                   last_checked_at=now() WHERE id=$1""",
+                row["id"],
+            )
+            verify_status, ref_id = await self.zarinpal.verify(
+                row["amount"],
+                row["authority"],
+            )
+            if verify_status != "verified":
+                continue
+            try:
+                payment, changed = await self.db.finalize_gateway(
+                    row["authority"],
+                    ref_id,
+                )
+            except ValueError:
+                log.exception("Verified payment could not be finalized: %s", row["id"])
+                await self.api.send_message(
+                    self.config.admin_chat_id,
+                    f"⚠️ پرداخت زرین‌پال #{row['id']} در درگاه تأیید شده "
+                    "ولی سفارش محلی قابل نهایی‌سازی نیست؛ فوری بررسی شود.",
+                )
+                continue
+            if changed:
+                user = await self.db.pool.fetchrow(
+                    "SELECT chat_id FROM users WHERE id=$1",
+                    payment["user_id"],
+                )
+                await self.api.send_message(
+                    user["chat_id"],
+                    f"✅ پرداخت {payment['amount']:,} تومان پس از بررسی مجدد ثبت شد.\n"
+                    f"کد پیگیری: {ref_id}",
+                )
 
 
 async def webhook(request):
@@ -292,18 +446,35 @@ async def payment_callback(request):
     payment = await core.db.payment_by_authority(authority) if authority else None
     if payment and payment["status"] == "verified":
         title, message = "پرداخت موفق", "این پرداخت قبلاً ثبت شده است."
-    elif payment and payment["status"] == "pending" and callback_status != "NOK":
+    elif (
+        payment
+        and payment["status"] in {"pending", "expired", "cancelled"}
+        and callback_status == "OK"
+    ):
         verify_status, ref_id = await core.zarinpal.verify(payment["amount"], authority)
         if verify_status == "verified":
-            finalized, _ = await core.db.finalize_gateway(authority, ref_id)
-            user = await core.db.pool.fetchrow(
-                "SELECT chat_id FROM users WHERE id=$1", finalized["user_id"]
-            )
-            await core.api.send_message(
-                user["chat_id"],
-                f"✅ پرداخت {finalized['amount']:,} تومان ثبت شد.\nکد پیگیری: {ref_id}",
-            )
-            title, message = "پرداخت موفق", f"کد پیگیری: {ref_id}"
+            try:
+                finalized, changed = await core.db.finalize_gateway(authority, ref_id)
+            except ValueError as exc:
+                title, message = "پرداخت قابل ثبت نیست", str(exc)
+                await core.api.send_message(
+                    core.config.admin_chat_id,
+                    f"⚠️ زرین‌پال پرداخت #{payment['id']} به مبلغ "
+                    f"{payment['amount']:,} تومان را تأیید کرد، اما ثبت محلی "
+                    f"انجام نشد: {exc}\nکد پیگیری: {ref_id}",
+                )
+            else:
+                if changed:
+                    user = await core.db.pool.fetchrow(
+                        "SELECT chat_id FROM users WHERE id=$1",
+                        finalized["user_id"],
+                    )
+                    await core.api.send_message(
+                        user["chat_id"],
+                        f"✅ پرداخت {finalized['amount']:,} تومان ثبت شد.\n"
+                        f"کد پیگیری: {ref_id}",
+                    )
+                title, message = "پرداخت موفق", f"کد پیگیری: {ref_id}"
         elif verify_status == "unavailable":
             title = "در حال بررسی"
             message = "ارتباط با درگاه برقرار نشد؛ کمی بعد دوباره صفحه را باز کن."

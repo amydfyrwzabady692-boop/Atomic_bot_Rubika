@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS orders (
   paid_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE orders
+  ADD COLUMN IF NOT EXISTS inventory_reserved BOOLEAN NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS order_items (
   id BIGSERIAL PRIMARY KEY,
   order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -103,6 +105,10 @@ CREATE TABLE IF NOT EXISTS payments (
   verified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE payments
+  ADD COLUMN IF NOT EXISTS verify_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE payments
+  ADD COLUMN IF NOT EXISTS last_checked_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS wallet_ledger (
   id BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL REFERENCES users(id),
@@ -191,6 +197,10 @@ CREATE TABLE IF NOT EXISTS fulfillments (
   error TEXT NOT NULL DEFAULT '',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE fulfillments
+  ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fulfillments
+  ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS audit_logs (
   id BIGSERIAL PRIMARY KEY,
   admin_id TEXT NOT NULL,
@@ -208,7 +218,11 @@ CREATE INDEX IF NOT EXISTS idx_processed_events_created ON processed_events(crea
 INSERT INTO settings(key,value) VALUES
  ('shop_name','اتومیک شاپ روبیکا'),
  ('welcome_text','✨ به اتومیک شاپ روبیکا خوش اومدی! ✨'),
+ ('help_text',''),
+ ('support_prompt',''),
  ('support_id',''),
+ ('sales_enabled','1'),
+ ('payments_enabled','1'),
  ('zarinpal_enabled','1'),
  ('card_enabled','1'),
  ('card_number',''),
@@ -216,6 +230,31 @@ INSERT INTO settings(key,value) VALUES
  ('card_bank',''),
  ('usd_toman_rate','')
 ON CONFLICT (key) DO NOTHING;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings WHERE key='inventory_reservation_v1'
+  ) THEN
+    WITH reserved AS (
+      SELECT i.product_id,sum(i.quantity)::integer quantity
+      FROM order_items i JOIN orders o ON o.id=i.order_id
+      WHERE o.status='pending' AND NOT o.inventory_reserved
+      GROUP BY i.product_id
+    )
+    UPDATE products p
+    SET stock=greatest(0,p.stock-r.quantity)
+    FROM reserved r WHERE p.id=r.product_id;
+
+    UPDATE orders SET inventory_reserved=true
+    WHERE status='pending' AND NOT inventory_reserved;
+
+    INSERT INTO settings(key,value)
+    VALUES('inventory_reservation_v1','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $$;
+
 INSERT INTO departments(title) VALUES ('عمومی'),('مالی'),('پیگیری سفارش')
 ON CONFLICT (title) DO NOTHING;
 INSERT INTO categories(title) VALUES ('جم فری‌فایر'),('سنسیویتی موبایل'),('سنسیویتی PC')
