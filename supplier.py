@@ -1,8 +1,12 @@
-import hashlib
 import os
+import uuid
 from decimal import ROUND_HALF_UP, Decimal
 
 import aiohttp
+
+
+def g2_idempotency_key(order_id: int) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"atomic-rubika:order:{order_id}"))
 
 
 async def usd_toman_rate():
@@ -68,7 +72,7 @@ class G2Bulk:
             return {"success": False, "message": str(exc)}
 
     async def order(self, sku, player_id, order_id):
-        idem = hashlib.sha256(f"atomic-rubika:{order_id}".encode()).hexdigest()
+        idem = g2_idempotency_key(order_id)
         if not self.key:
             return {
                 "ok": False,

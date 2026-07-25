@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 from keyboards import main_menu
 from payment_safety import checked_amount, order_amounts
 from rubika_api import normalize_event
+from supplier import g2_idempotency_key
 
 
 class EventTests(unittest.TestCase):
@@ -62,6 +63,11 @@ class FinancialTests(unittest.TestCase):
             order_amounts(100_000, 100_000, 0)
         with self.assertRaises(ValueError):
             order_amounts(100_000, 0, 100_001)
+
+    def test_g2bulk_idempotency_key_is_stable_uuid(self):
+        first = g2_idempotency_key(42)
+        self.assertEqual(first, g2_idempotency_key(42))
+        self.assertEqual(len(first), 36)
 
 
 class KeyboardTests(unittest.TestCase):
