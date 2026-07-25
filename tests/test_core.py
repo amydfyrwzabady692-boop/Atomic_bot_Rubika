@@ -110,6 +110,16 @@ class DatabaseTests(unittest.TestCase):
         source = inspect.getsource(Router.pay_order)
         self.assertIn('or os.getenv(\n            "CARD_TRANSFER_NUMBER"', source)
 
+    def test_receipt_review_has_buttons_and_safe_command_validation(self):
+        handle_source = inspect.getsource(Router.handle)
+        command_source = inspect.getsource(Router.admin_command)
+        message_source = inspect.getsource(Router.handle_state)
+        self.assertIn('action.startswith(("receipt_ok:", "receipt_no:"))', handle_source)
+        self.assertIn("✅ تأیید رسید", message_source)
+        self.assertIn("❌ رد رسید", message_source)
+        self.assertIn("if not receipt_arg.isdigit()", command_source)
+        self.assertIn("شماره رسید را وارد کن", command_source)
+
 
 class KeyboardTests(unittest.TestCase):
     def test_main_keyboard_uses_official_shape(self):

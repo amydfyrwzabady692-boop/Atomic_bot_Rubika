@@ -56,6 +56,28 @@ class Router:
             else:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
             return
+        if action.startswith(("receipt_ok:", "receipt_no:")):
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            match = re.fullmatch(r"receipt_(ok|no):([1-9]\d*)", action)
+            if not match:
+                await self.send(event["chat_id"], "❌ شناسه رسید نامعتبر است.")
+                return
+            approved = match.group(1) == "ok"
+            receipt_id = int(match.group(2))
+            try:
+                await self.review_receipt(event["sender_id"], receipt_id, approved)
+                await self.db.audit(
+                    event["sender_id"],
+                    "/receipt_ok" if approved else "/receipt_no",
+                    details=str(receipt_id),
+                )
+                result = "تأیید" if approved else "رد"
+                await self.send(event["chat_id"], f"✅ رسید #{receipt_id} {result} شد.")
+            except ValueError as exc:
+                await self.send(event["chat_id"], f"❌ {exc}")
+            return
         if action.startswith("/") and await self.db.is_admin(
             event["sender_id"], self.config.admin_id
         ):
@@ -503,10 +525,18 @@ class Router:
                 await self.send(event["chat_id"], "این رسید قبلاً ثبت شده است.")
                 return
             await self.send(event["chat_id"], f"✅ رسید #{receipt['id']} ثبت و منتظر تأیید است.")
-            await self.api.send_message(
+            await self.send(
                 self.config.admin_chat_id,
                 f"🧾 رسید جدید #{receipt['id']}\n"
-                f"تأیید: /receipt_ok {receipt['id']}\nرد: /receipt_no {receipt['id']}",
+                f"برای بررسی رسید یکی از دکمه‌های زیر را بزن:",
+                buttons=inline(
+                    [
+                        [
+                            (f"receipt_ok:{receipt['id']}", "✅ تأیید رسید"),
+                            (f"receipt_no:{receipt['id']}", "❌ رد رسید"),
+                        ]
+                    ]
+                ),
             )
             try:
                 await self.api.forward_message(
@@ -629,7 +659,12 @@ class Router:
                     row["chat_id"], f"🎧 پاسخ پشتیبانی #{ticket_id}\n{text}"
                 )
             elif name in {"/receipt_ok", "/receipt_no"}:
-                await self.review_receipt(admin_id, int(args), name.endswith("_ok"))
+                receipt_arg = args.strip()
+                if not receipt_arg.isdigit() or int(receipt_arg) <= 0:
+                    raise ValueError(
+                        f"شماره رسید را وارد کن؛ مثال: {name} 1"
+                    )
+                await self.review_receipt(admin_id, int(receipt_arg), name.endswith("_ok"))
             elif name in {"/join_ok", "/join_no"}:
                 await self.review_join(admin_id, int(args), name.endswith("_ok"))
             elif name == "/setting":
