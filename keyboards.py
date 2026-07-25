@@ -13,11 +13,10 @@ def keypad(rows: list[list[tuple[str, str]]]) -> dict:
 def main_menu() -> dict:
     return keypad(
         [
-            [("gems", "💎 خرید جم"), ("sense", "🎯 پک سنسیویتی")],
-            [("store", "🛍 فروشگاه"), ("wallet", "💰 کیف پول")],
+            [("gems", "💎 جم فری‌فایر"), ("wallet", "💰 کیف پول")],
             [("orders", "📦 سفارش‌های من"), ("account", "👤 حساب من")],
-            [("promo", "🎁 ثبت کد"), ("support", "🧑‍💻 پشتیبانی")],
-            [("help", "📚 راهنما")],
+            [("store", "🛍 فروشگاه اکانت"), ("sense", "🎯 پک سنس")],
+            [("support", "🎧 پشتیبانی")],
         ]
     )
 

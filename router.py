@@ -7,7 +7,7 @@ from keyboards import admin_menu, inline, main_menu
 from payment_safety import MIN_WALLET_CHARGE, checked_amount
 from payments import Zarinpal
 from rubika_api import RubikaAPI, RubikaAPIError
-from supplier import usd_toman_rate
+from supplier import G2Bulk, usd_toman_rate
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ class Router:
     def __init__(self, db: Database, api: RubikaAPI, config):
         self.db, self.api, self.config = db, api, config
         self.zarinpal = Zarinpal()
+        self.g2 = G2Bulk()
 
     async def send(self, chat_id, text, *, menu=None, buttons=None):
         return await self.api.send_message(chat_id, text, chat_keypad=menu, inline_keypad=buttons)
@@ -63,6 +64,33 @@ class Router:
         if action.startswith("product:"):
             await self.product_selected(event, user, int(action.split(":")[1]))
             return
+        if action.startswith("gem_buy:"):
+            await self.ask_gem_player_id(event, int(action.split(":")[1]))
+            return
+        if action == "gem_confirm":
+            state, data = await self.db.session(event["sender_id"])
+            if state != "gem_confirm":
+                await self.send(event["chat_id"], "جلسه خرید منقضی شده؛ دوباره بسته را انتخاب کن.")
+                return
+            await self.db.set_session(event["sender_id"])
+            await self.create_order_prompt(
+                event,
+                user,
+                int(data["product_id"]),
+                str(data["player_id"]),
+            )
+            return
+        if action == "gem_reedit":
+            state, data = await self.db.session(event["sender_id"])
+            if state != "gem_confirm":
+                await self.send(event["chat_id"], "جلسه خرید منقضی شده؛ دوباره بسته را انتخاب کن.")
+                return
+            await self.ask_gem_player_id(event, int(data["product_id"]))
+            return
+        if action == "gem_cancel":
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], "✖️ ثبت سفارش لغو شد.", menu=main_menu())
+            return
         if action.startswith("pay:"):
             _, method, order_id = action.split(":")
             await self.pay_order(event, user, int(order_id), method)
@@ -70,12 +98,17 @@ class Router:
         routes = {
             "gems": lambda: self.show_products(event, "gem", "💎 بسته‌های جم"),
             "💎 خرید جم": lambda: self.show_products(event, "gem", "💎 بسته‌های جم"),
+            "💎 جم فری‌فایر": lambda: self.show_products(event, "gem", "💎 بسته‌های جم"),
             "sense": lambda: self.sense_menu(event),
             "🎯 پک سنسیویتی": lambda: self.sense_menu(event),
+            "🎯 پک سنس": lambda: self.sense_menu(event),
             "sense_mobile": lambda: self.show_products(event, "sense_mobile", "📱 سنسیویتی موبایل"),
             "sense_pc": lambda: self.show_products(event, "sense_pc", "🖥 سنسیویتی PC"),
             "store": lambda: self.show_products(event, "store", "🛍 محصولات فروشگاه"),
             "🛍 فروشگاه": lambda: self.show_products(event, "store", "🛍 محصولات فروشگاه"),
+            "🛍 فروشگاه اکانت": lambda: self.show_products(
+                event, "store", "🛍 محصولات فروشگاه"
+            ),
             "wallet": lambda: self.wallet(event, user),
             "💰 کیف پول": lambda: self.wallet(event, user),
             "wallet_charge": lambda: self.ask_wallet_charge(event),
@@ -85,6 +118,7 @@ class Router:
             "👤 حساب من": lambda: self.account(event, user),
             "support": lambda: self.ask_support(event),
             "🧑‍💻 پشتیبانی": lambda: self.ask_support(event),
+            "🎧 پشتیبانی": lambda: self.ask_support(event),
             "promo": lambda: self.ask_promo(event),
             "🎁 ثبت کد": lambda: self.ask_promo(event),
             "help": lambda: self.help(event),
@@ -171,12 +205,38 @@ class Router:
             await self.send(event["chat_id"], "این محصول دیگر موجود نیست.")
             return
         if product["kind"] == "gem":
-            await self.db.set_session(
-                event["sender_id"], "gem_player_id", {"product_id": product_id}
+            await self.send(
+                event["chat_id"],
+                f"💎 {product['title']}\n"
+                f"تعداد جم: {product['amount']:,}\n"
+                f"💰 قیمت: {product['price']:,} تومان\n\n"
+                "برای ادامه خرید، بسته را تأیید کن.",
+                buttons=inline(
+                    [
+                        [(f"gem_buy:{product_id}", "✅ خرید این بسته")],
+                        [("gems", "🔙 بازگشت به فهرست")],
+                    ]
+                ),
             )
-            await self.send(event["chat_id"], "🎮 آیدی عددی فری‌فایر را ارسال کن:")
             return
         await self.create_order_prompt(event, user, product_id)
+
+    async def ask_gem_player_id(self, event, product_id):
+        product = await self.db.pool.fetchrow(
+            "SELECT id FROM products WHERE id=$1 AND kind='gem' AND active AND stock>0",
+            product_id,
+        )
+        if not product:
+            await self.send(event["chat_id"], "این بسته دیگر موجود یا فعال نیست.")
+            return
+        await self.db.set_session(
+            event["sender_id"], "gem_player_id", {"product_id": product_id}
+        )
+        await self.send(
+            event["chat_id"],
+            "🎮 آیدی عددی فری‌فایر را ارسال کن:",
+            buttons=inline([[("gem_cancel", "✖️ انصراف")]]),
+        )
 
     async def create_order_prompt(self, event, user, product_id, player_id=""):
         order, product = await self.db.create_order(user["id"], product_id, player_id)
@@ -300,12 +360,54 @@ class Router:
 
     async def handle_state(self, event, user, state, data):
         if state == "gem_player_id":
-            player_id = re.sub(r"\s+", "", event["text"])
+            player_id = re.sub(r"\s+", "", event["text"]).translate(
+                str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+            )
             if not player_id.isdigit() or not 5 <= len(player_id) <= 20:
                 await self.send(event["chat_id"], "آیدی معتبر نیست؛ فقط عدد بفرست.")
                 return
-            await self.db.set_session(event["sender_id"])
-            await self.create_order_prompt(event, user, int(data["product_id"]), player_id)
+            await self.send(event["chat_id"], "⏳ در حال بررسی آیدی بازی…")
+            result = await self.g2.check_player(player_id)
+            if not result["ok"]:
+                await self.send(
+                    event["chat_id"],
+                    f"❌ {result['error']}\nآیدی را اصلاح کن و دوباره بفرست.",
+                    buttons=inline([[("gem_cancel", "✖️ انصراف")]]),
+                )
+                return
+            product = await self.db.pool.fetchrow(
+                "SELECT * FROM products WHERE id=$1 AND kind='gem' AND active AND stock>0",
+                int(data["product_id"]),
+            )
+            if not product:
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "این بسته دیگر موجود یا فعال نیست.")
+                return
+            await self.db.set_session(
+                event["sender_id"],
+                "gem_confirm",
+                {
+                    "product_id": product["id"],
+                    "player_id": player_id,
+                    "player_name": result["name"],
+                },
+            )
+            await self.send(
+                event["chat_id"],
+                "✅ اکانت تأیید شد\n"
+                f"👤 نام اکانت: {result['name']}\n"
+                f"🆔 UID: {player_id}\n"
+                f"💎 بسته: {product['title']}\n"
+                f"💰 مبلغ: {product['price']:,} تومان\n\n"
+                "اگر اطلاعات درست است، تأیید کن.",
+                buttons=inline(
+                    [
+                        [("gem_confirm", "✅ تأیید و ادامه پرداخت")],
+                        [("gem_reedit", "✏️ اصلاح آیدی")],
+                        [("gem_cancel", "✖️ انصراف")],
+                    ]
+                ),
+            )
         elif state == "wallet_amount":
             try:
                 amount = checked_amount(

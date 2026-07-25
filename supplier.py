@@ -105,6 +105,25 @@ class G2Bulk:
             "error": data.get("message") or "خطای تامین‌کننده",
         }
 
+    async def check_player(self, player_id: str):
+        if not self.key:
+            return {"ok": False, "error": "سرویس بررسی آیدی تنظیم نشده است."}
+        data = await self._call(
+            "POST",
+            "/games/checkPlayerId",
+            {"game": self.game, "user_id": str(player_id)},
+        )
+        valid = str(data.get("valid") or "").strip().lower()
+        if valid == "valid":
+            return {
+                "ok": True,
+                "name": str(data.get("name") or "بازیکن"),
+            }
+        return {
+            "ok": False,
+            "error": data.get("message") or data.get("error") or "آیدی معتبر نیست.",
+        }
+
     async def status(self, provider_order_id):
         data = await self._call(
             "POST",

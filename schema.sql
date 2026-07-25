@@ -222,10 +222,44 @@ INSERT INTO categories(title) VALUES ('جم فری‌فایر'),('سنسیویت
 ON CONFLICT DO NOTHING;
 INSERT INTO products(kind,title,amount,supplier_sku,price,stock)
 SELECT * FROM (VALUES
- ('gem','۱۱۰ جم',110,'110 Diamonds',75000,9999),
- ('gem','۲۳۱ جم',231,'231 Diamonds',150000,9999),
- ('gem','۵۸۳ جم',583,'583 Diamonds',365000,9999),
- ('gem','۱۱۸۸ جم',1188,'1188 Diamonds',730000,9999),
- ('gem','۲۴۲۰ جم',2420,'2420 Diamonds',1450000,9999)
+ ('gem','بسته ۱۱۰ جمی',110,'110',200000,9999),
+ ('gem','بسته ۲۳۱ جمی',231,'231',400000,9999),
+ ('gem','بسته ۵۸۳ جمی',583,'583',1000000,9999),
+ ('gem','بسته ۱۱۸۸ جمی',1188,'1188',2000000,9999),
+ ('gem','بسته ۲۴۲۰ جمی',2420,'2420',4000000,9999)
 ) AS seed(kind,title,amount,supplier_sku,price,stock)
 WHERE NOT EXISTS (SELECT 1 FROM products);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings WHERE key='telegram_catalog_20260726'
+  ) THEN
+    UPDATE products SET title='بسته ۱۱۰ جمی',supplier_sku='110',
+      price=200000,stock=9999,active=true WHERE kind='gem' AND amount=110;
+    UPDATE products SET title='بسته ۲۳۱ جمی',supplier_sku='231',
+      price=400000,stock=9999,active=true WHERE kind='gem' AND amount=231;
+    UPDATE products SET title='بسته ۵۸۳ جمی',supplier_sku='583',
+      price=1000000,stock=9999,active=true WHERE kind='gem' AND amount=583;
+    UPDATE products SET title='بسته ۱۱۸۸ جمی',supplier_sku='1188',
+      price=2000000,stock=9999,active=true WHERE kind='gem' AND amount=1188;
+    UPDATE products SET title='بسته ۲۴۲۰ جمی',supplier_sku='2420',
+      price=4000000,stock=9999,active=true WHERE kind='gem' AND amount=2420;
+
+    INSERT INTO products(kind,title,description,price,stock,active)
+    SELECT 'sense_pc','پک سنس PC','پک سنس مخصوص سیستم PC',1000000,9999,true
+    WHERE NOT EXISTS (
+      SELECT 1 FROM products WHERE kind='sense_pc' AND title='پک سنس PC'
+    );
+    INSERT INTO products(kind,title,description,price,stock,active)
+    SELECT 'sense_pc','پک سنس PC + خدمات',
+      'پک سنس PC همراه با خدمات',2200000,9999,true
+    WHERE NOT EXISTS (
+      SELECT 1 FROM products
+      WHERE kind='sense_pc' AND title='پک سنس PC + خدمات'
+    );
+
+    INSERT INTO settings(key,value) VALUES('telegram_catalog_20260726','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $$;

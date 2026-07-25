@@ -60,7 +60,15 @@ class Database:
         row = await self.pool.fetchrow(
             "SELECT state,data FROM sessions WHERE rubika_id=$1", rubika_id
         )
-        return (row["state"], dict(row["data"])) if row else ("", {})
+        if not row:
+            return "", {}
+        data = row["data"]
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (TypeError, ValueError):
+                data = {}
+        return row["state"], data if isinstance(data, dict) else {}
 
     async def set_session(self, rubika_id: str, state="", data=None):
         await self.pool.execute(

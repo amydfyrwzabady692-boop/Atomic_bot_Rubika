@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT))
 
+from database import Database
 from keyboards import main_menu
 from payment_safety import checked_amount, order_amounts
 from rubika_api import normalize_event
@@ -70,6 +72,30 @@ class FinancialTests(unittest.TestCase):
         self.assertEqual(len(first), 36)
 
 
+class DatabaseTests(unittest.TestCase):
+    def test_session_decodes_json_text(self):
+        class Pool:
+            async def fetchrow(self, *_args):
+                return {"state": "gem_player_id", "data": '{"product_id": 7}'}
+
+        database = Database("postgresql://unused")
+        database.pool = Pool()
+        state, data = asyncio.run(database.session("u1"))
+        self.assertEqual(state, "gem_player_id")
+        self.assertEqual(data, {"product_id": 7})
+
+    def test_session_rejects_malformed_json_text(self):
+        class Pool:
+            async def fetchrow(self, *_args):
+                return {"state": "gem_player_id", "data": "not-json"}
+
+        database = Database("postgresql://unused")
+        database.pool = Pool()
+        state, data = asyncio.run(database.session("u1"))
+        self.assertEqual(state, "gem_player_id")
+        self.assertEqual(data, {})
+
+
 class KeyboardTests(unittest.TestCase):
     def test_main_keyboard_uses_official_shape(self):
         value = main_menu()
@@ -79,6 +105,13 @@ class KeyboardTests(unittest.TestCase):
             for button in row["buttons"]:
                 self.assertEqual(button["type"], "Simple")
                 self.assertTrue(button["id"])
+        labels = [
+            button["button_text"]
+            for row in value["rows"]
+            for button in row["buttons"]
+        ]
+        self.assertIn("💎 جم فری‌فایر", labels)
+        self.assertIn("🛍 فروشگاه اکانت", labels)
 
 
 class SchemaTests(unittest.TestCase):
@@ -91,6 +124,8 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("order_id BIGINT UNIQUE", schema)
         self.assertIn("UNIQUE(code_id,user_id)", schema)
         self.assertIn("pending_discounts", schema)
+        self.assertIn("telegram_catalog_20260726", schema)
+        self.assertIn("('gem','بسته ۱۱۰ جمی',110,'110',200000,9999)", schema)
 
 
 if __name__ == "__main__":
