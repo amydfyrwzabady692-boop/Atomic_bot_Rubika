@@ -296,9 +296,15 @@ class Router:
                 f"{url}\n\nاین لینک قابل کپی است.",
             )
             return
-        number = await self.db.setting("card_number", os.getenv("CARD_TRANSFER_NUMBER", ""))
-        holder = await self.db.setting("card_holder", os.getenv("CARD_TRANSFER_HOLDER", ""))
-        bank = await self.db.setting("card_bank", os.getenv("CARD_TRANSFER_BANK", ""))
+        number = (await self.db.setting("card_number", "")).strip() or os.getenv(
+            "CARD_TRANSFER_NUMBER", ""
+        ).strip()
+        holder = (await self.db.setting("card_holder", "")).strip() or os.getenv(
+            "CARD_TRANSFER_HOLDER", ""
+        ).strip()
+        bank = (await self.db.setting("card_bank", "")).strip() or os.getenv(
+            "CARD_TRANSFER_BANK", ""
+        ).strip()
         if not number:
             await self.send(event["chat_id"], "کارت‌به‌کارت فعلاً فعال نیست.")
             return

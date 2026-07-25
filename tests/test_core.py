@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 from database import Database
 from keyboards import main_menu
 from payment_safety import checked_amount, order_amounts
+from router import Router
 from rubika_api import normalize_event
 from supplier import g2_idempotency_key
 
@@ -104,6 +105,10 @@ class DatabaseTests(unittest.TestCase):
         source = inspect.getsource(Database.create_payment)
         self.assertIn("$5::bigint", source)
         self.assertIn("make_interval(mins => $6::int)", source)
+
+    def test_card_settings_fall_back_to_environment(self):
+        source = inspect.getsource(Router.pay_order)
+        self.assertIn('or os.getenv(\n            "CARD_TRANSFER_NUMBER"', source)
 
 
 class KeyboardTests(unittest.TestCase):
