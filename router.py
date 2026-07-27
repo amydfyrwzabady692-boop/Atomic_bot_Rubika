@@ -411,10 +411,15 @@ class Router:
             await self.send(event["chat_id"], "این محصول دیگر موجود نیست.")
             return
         if product["kind"] == "gem":
+            supplier_sku = str(product["supplier_sku"] or "").strip()
+            if supplier_sku.isdigit():
+                product_line = f"تعداد جم: {product['amount']:,}"
+            else:
+                product_line = f"محصول: {product['title']}"
             await self.send(
                 event["chat_id"],
                 f"💎 {product['title']}\n"
-                f"تعداد جم: {product['amount']:,}\n"
+                f"{product_line}\n"
                 f"💰 قیمت: {product['price']:,} تومان\n\n"
                 "برای ادامه خرید، بسته را تأیید کن.",
                 buttons=inline(

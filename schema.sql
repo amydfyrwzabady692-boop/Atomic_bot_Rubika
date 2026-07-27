@@ -261,29 +261,82 @@ INSERT INTO categories(title) VALUES ('جم فری‌فایر'),('سنسیویت
 ON CONFLICT DO NOTHING;
 INSERT INTO products(kind,title,amount,supplier_sku,price,stock)
 SELECT * FROM (VALUES
- ('gem','بسته ۱۱۰ جمی',110,'110',200000,9999),
- ('gem','بسته ۲۳۱ جمی',231,'231',400000,9999),
- ('gem','بسته ۵۸۳ جمی',583,'583',1000000,9999),
- ('gem','بسته ۱۱۸۸ جمی',1188,'1188',2000000,9999),
- ('gem','بسته ۲۴۲۰ جمی',2420,'2420',4000000,9999)
+ ('gem','Level Up Package - Level 6',6,'Level Up Package - Level 6',65000,9999),
+ ('gem','Level Up Package - Level 10',10,'Level Up Package - Level 10',110000,9999),
+ ('gem','Level Up Package - Level 15',15,'Level Up Package - Level 15',110000,9999),
+ ('gem','Level Up Package - Level 20',20,'Level Up Package - Level 20',110000,9999),
+ ('gem','Level Up Package - Level 25',25,'Level Up Package - Level 25',110000,9999),
+ ('gem','Level Up Package - Level 30',30,'Level Up Package - Level 30',172000,9999),
+ ('gem','110',110,'110',191000,9999),
+ ('gem','231',231,'231',382000,9999),
+ ('gem','Weekly Membership',90001,'Weekly Membership',430000,9999),
+ ('gem','Booyah Pass',90002,'Booyah Pass',640000,9999),
+ ('gem','583',583,'583',956000,9999),
+ ('gem','1188',1188,'1188',1913000,9999),
+ ('gem','Monthly Membership',90003,'Monthly Membership',2106000,9999),
+ ('gem','2420',2420,'2420',3824000,9999)
 ) AS seed(kind,title,amount,supplier_sku,price,stock)
 WHERE NOT EXISTS (SELECT 1 FROM products);
+
+DO $catalogue$
+DECLARE
+  item RECORD;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings WHERE key='g2bulk_catalogue_14_20260727'
+  ) THEN
+    FOR item IN SELECT * FROM (VALUES
+      ('Level Up Package - Level 6',6,65000,0.296::numeric),
+      ('Level Up Package - Level 10',10,110000,0.510::numeric),
+      ('Level Up Package - Level 15',15,110000,0.510::numeric),
+      ('Level Up Package - Level 20',20,110000,0.510::numeric),
+      ('Level Up Package - Level 25',25,110000,0.510::numeric),
+      ('Level Up Package - Level 30',30,172000,0.826::numeric),
+      ('110',110,191000,0.935::numeric),
+      ('231',231,382000,1.870::numeric),
+      ('Weekly Membership',90001,430000,2.081::numeric),
+      ('Booyah Pass',90002,640000,3.121::numeric),
+      ('583',583,956000,4.675::numeric),
+      ('1188',1188,1913000,9.350::numeric),
+      ('Monthly Membership',90003,2106000,10.394::numeric),
+      ('2420',2420,3824000,18.700::numeric)
+    ) AS approved(sku,product_amount,sale_price,cost_usd)
+    LOOP
+      UPDATE products SET title=item.sku,amount=item.product_amount,
+        price=item.sale_price,supplier_cost_usd=item.cost_usd,
+        stock=9999,active=true
+      WHERE kind='gem' AND supplier_sku=item.sku;
+      IF NOT FOUND THEN
+        INSERT INTO products(
+          kind,title,amount,supplier_sku,supplier_cost_usd,price,stock,active
+        ) VALUES (
+          'gem',item.sku,item.product_amount,item.sku,item.cost_usd,
+          item.sale_price,9999,true
+        );
+      END IF;
+    END LOOP;
+
+    INSERT INTO settings(key,value)
+    VALUES('g2bulk_catalogue_14_20260727','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $catalogue$;
 
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM settings WHERE key='telegram_catalog_20260726'
   ) THEN
-    UPDATE products SET title='بسته ۱۱۰ جمی',supplier_sku='110',
-      price=200000,stock=9999,active=true WHERE kind='gem' AND amount=110;
-    UPDATE products SET title='بسته ۲۳۱ جمی',supplier_sku='231',
-      price=400000,stock=9999,active=true WHERE kind='gem' AND amount=231;
-    UPDATE products SET title='بسته ۵۸۳ جمی',supplier_sku='583',
-      price=1000000,stock=9999,active=true WHERE kind='gem' AND amount=583;
-    UPDATE products SET title='بسته ۱۱۸۸ جمی',supplier_sku='1188',
-      price=2000000,stock=9999,active=true WHERE kind='gem' AND amount=1188;
-    UPDATE products SET title='بسته ۲۴۲۰ جمی',supplier_sku='2420',
-      price=4000000,stock=9999,active=true WHERE kind='gem' AND amount=2420;
+    UPDATE products SET title='110',supplier_sku='110',
+      price=191000,stock=9999,active=true WHERE kind='gem' AND amount=110;
+    UPDATE products SET title='231',supplier_sku='231',
+      price=382000,stock=9999,active=true WHERE kind='gem' AND amount=231;
+    UPDATE products SET title='583',supplier_sku='583',
+      price=956000,stock=9999,active=true WHERE kind='gem' AND amount=583;
+    UPDATE products SET title='1188',supplier_sku='1188',
+      price=1913000,stock=9999,active=true WHERE kind='gem' AND amount=1188;
+    UPDATE products SET title='2420',supplier_sku='2420',
+      price=3824000,stock=9999,active=true WHERE kind='gem' AND amount=2420;
 
     INSERT INTO products(kind,title,description,price,stock,active)
     SELECT 'sense_pc','پک سنس PC','پک سنس مخصوص سیستم PC',1000000,9999,true
