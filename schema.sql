@@ -261,20 +261,20 @@ INSERT INTO categories(title) VALUES ('جم فری‌فایر'),('سنسیویت
 ON CONFLICT DO NOTHING;
 INSERT INTO products(kind,title,amount,supplier_sku,price,stock)
 SELECT * FROM (VALUES
- ('gem','Level Up Package - Level 6',6,'Level Up Package - Level 6',65000,9999),
- ('gem','Level Up Package - Level 10',10,'Level Up Package - Level 10',110000,9999),
- ('gem','Level Up Package - Level 15',15,'Level Up Package - Level 15',110000,9999),
- ('gem','Level Up Package - Level 20',20,'Level Up Package - Level 20',110000,9999),
- ('gem','Level Up Package - Level 25',25,'Level Up Package - Level 25',110000,9999),
- ('gem','Level Up Package - Level 30',30,'Level Up Package - Level 30',172000,9999),
- ('gem','110',110,'110',191000,9999),
- ('gem','231',231,'231',382000,9999),
- ('gem','Weekly Membership',90001,'Weekly Membership',430000,9999),
- ('gem','Booyah Pass',90002,'Booyah Pass',640000,9999),
- ('gem','583',583,'583',956000,9999),
- ('gem','1188',1188,'1188',1913000,9999),
- ('gem','Monthly Membership',90003,'Monthly Membership',2106000,9999),
- ('gem','2420',2420,'2420',3824000,9999)
+ ('gem','🎯 لول‌آپ سطح 6',6,'Level Up Package - Level 6',65000,9999),
+ ('gem','🎯 لول‌آپ سطح 10',10,'Level Up Package - Level 10',110000,9999),
+ ('gem','🎯 لول‌آپ سطح 15',15,'Level Up Package - Level 15',110000,9999),
+ ('gem','🎯 لول‌آپ سطح 20',20,'Level Up Package - Level 20',110000,9999),
+ ('gem','🎯 لول‌آپ سطح 25',25,'Level Up Package - Level 25',110000,9999),
+ ('gem','🎯 لول‌آپ سطح 30',30,'Level Up Package - Level 30',172000,9999),
+ ('gem','💎 110 جم',110,'110',191000,9999),
+ ('gem','💎 231 جم',231,'231',382000,9999),
+ ('gem','📅 عضویت هفتگی',90001,'Weekly Membership',430000,9999),
+ ('gem','🏆 بویاه پس',90002,'Booyah Pass',640000,9999),
+ ('gem','💎 583 جم',583,'583',956000,9999),
+ ('gem','💎 1188 جم',1188,'1188',1913000,9999),
+ ('gem','📆 عضویت ماهانه',90003,'Monthly Membership',2106000,9999),
+ ('gem','💎 2420 جم',2420,'2420',3824000,9999)
 ) AS seed(kind,title,amount,supplier_sku,price,stock)
 WHERE NOT EXISTS (SELECT 1 FROM products);
 
@@ -327,15 +327,15 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM settings WHERE key='telegram_catalog_20260726'
   ) THEN
-    UPDATE products SET title='110',supplier_sku='110',
+    UPDATE products SET title='💎 110 جم',supplier_sku='110',
       price=191000,stock=9999,active=true WHERE kind='gem' AND amount=110;
-    UPDATE products SET title='231',supplier_sku='231',
+    UPDATE products SET title='💎 231 جم',supplier_sku='231',
       price=382000,stock=9999,active=true WHERE kind='gem' AND amount=231;
-    UPDATE products SET title='583',supplier_sku='583',
+    UPDATE products SET title='💎 583 جم',supplier_sku='583',
       price=956000,stock=9999,active=true WHERE kind='gem' AND amount=583;
-    UPDATE products SET title='1188',supplier_sku='1188',
+    UPDATE products SET title='💎 1188 جم',supplier_sku='1188',
       price=1913000,stock=9999,active=true WHERE kind='gem' AND amount=1188;
-    UPDATE products SET title='2420',supplier_sku='2420',
+    UPDATE products SET title='💎 2420 جم',supplier_sku='2420',
       price=3824000,stock=9999,active=true WHERE kind='gem' AND amount=2420;
 
     INSERT INTO products(kind,title,description,price,stock,active)
@@ -355,3 +355,38 @@ BEGIN
     ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
   END IF;
 END $$;
+
+DO $titles$
+DECLARE
+  item RECORD;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings
+    WHERE key='g2bulk_catalogue_titles_fa_v2_20260727'
+  ) THEN
+    FOR item IN SELECT * FROM (VALUES
+      ('Level Up Package - Level 6','🎯 لول‌آپ سطح 6'),
+      ('Level Up Package - Level 10','🎯 لول‌آپ سطح 10'),
+      ('Level Up Package - Level 15','🎯 لول‌آپ سطح 15'),
+      ('Level Up Package - Level 20','🎯 لول‌آپ سطح 20'),
+      ('Level Up Package - Level 25','🎯 لول‌آپ سطح 25'),
+      ('Level Up Package - Level 30','🎯 لول‌آپ سطح 30'),
+      ('110','💎 110 جم'),
+      ('231','💎 231 جم'),
+      ('Weekly Membership','📅 عضویت هفتگی'),
+      ('Booyah Pass','🏆 بویاه پس'),
+      ('583','💎 583 جم'),
+      ('1188','💎 1188 جم'),
+      ('Monthly Membership','📆 عضویت ماهانه'),
+      ('2420','💎 2420 جم')
+    ) AS approved(sku,display_title)
+    LOOP
+      UPDATE products SET title=item.display_title
+      WHERE kind='gem' AND supplier_sku=item.sku;
+    END LOOP;
+
+    INSERT INTO settings(key,value)
+    VALUES('g2bulk_catalogue_titles_fa_v2_20260727','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $titles$;

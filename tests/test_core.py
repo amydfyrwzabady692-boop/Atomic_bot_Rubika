@@ -146,7 +146,7 @@ class KeyboardTests(unittest.TestCase):
             for row in value["rows"]
             for button in row["buttons"]
         ]
-        self.assertIn("💎 جم فری‌فایر", labels)
+        self.assertIn("🎮 محصولات فری‌فایر", labels)
         self.assertIn("🛍 فروشگاه اکانت", labels)
         self.assertIn("🎧 پشتیبانی", labels)
 
@@ -205,14 +205,15 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("telegram_catalog_20260726", schema)
         self.assertIn("g2bulk_catalogue_14_20260727", schema)
         self.assertIn(
-            "('gem','Level Up Package - Level 6',6,"
+            "('gem','🎯 لول‌آپ سطح 6',6,"
             "'Level Up Package - Level 6',65000,9999)",
             schema,
         )
         self.assertIn(
-            "('gem','2420',2420,'2420',3824000,9999)",
+            "('gem','💎 2420 جم',2420,'2420',3824000,9999)",
             schema,
         )
+        self.assertIn("g2bulk_catalogue_titles_fa_v2_20260727", schema)
 
 
 if __name__ == "__main__":

@@ -211,9 +211,12 @@ class Router:
             )
             return
         routes = {
-            "gems": lambda: self.show_products(event, "gem", "💎 بسته‌های جم"),
-            "💎 خرید جم": lambda: self.show_products(event, "gem", "💎 بسته‌های جم"),
-            "💎 جم فری‌فایر": lambda: self.show_products(event, "gem", "💎 بسته‌های جم"),
+            "gems": lambda: self.show_products(event, "gem", "🎮 محصولات فری‌فایر"),
+            "💎 خرید جم": lambda: self.show_products(event, "gem", "🎮 محصولات فری‌فایر"),
+            "💎 جم فری‌فایر": lambda: self.show_products(event, "gem", "🎮 محصولات فری‌فایر"),
+            "🎮 محصولات فری‌فایر": lambda: self.show_products(
+                event, "gem", "🎮 محصولات فری‌فایر"
+            ),
             "sense": lambda: self.sense_menu(event),
             "🎯 پک سنسیویتی": lambda: self.sense_menu(event),
             "🎯 پک سنس": lambda: self.sense_menu(event),
@@ -398,7 +401,11 @@ class Router:
             return
         buttons = [[(f"product:{r['id']}", f"{r['title']} — {r['price']:,} تومان")] for r in rows]
         buttons.append([("home", "🏠 بازگشت")])
-        await self.send(event["chat_id"], title, buttons=inline(buttons))
+        await self.send(
+            event["chat_id"],
+            f"{title}\n\nمحصول موردنظرت را انتخاب کن 👇",
+            buttons=inline(buttons),
+        )
 
     async def product_selected(self, event, user, product_id):
         if await self.db.setting("sales_enabled", "1") != "1":
@@ -414,11 +421,19 @@ class Router:
             supplier_sku = str(product["supplier_sku"] or "").strip()
             if supplier_sku.isdigit():
                 product_line = f"تعداد جم: {product['amount']:,}"
+            elif supplier_sku.startswith("Level Up Package"):
+                product_line = "🎯 نوع بسته: ارتقای سطح"
+            elif supplier_sku == "Weekly Membership":
+                product_line = "📅 اعتبار: عضویت هفتگی"
+            elif supplier_sku == "Monthly Membership":
+                product_line = "📆 اعتبار: عضویت ماهانه"
+            elif supplier_sku == "Booyah Pass":
+                product_line = "🏆 نوع محصول: بویاه پس"
             else:
-                product_line = f"محصول: {product['title']}"
+                product_line = "📦 محصول ویژه فری‌فایر"
             await self.send(
                 event["chat_id"],
-                f"💎 {product['title']}\n"
+                f"🎮 {product['title']}\n"
                 f"{product_line}\n"
                 f"💰 قیمت: {product['price']:,} تومان\n\n"
                 "برای ادامه خرید، بسته را تأیید کن.",

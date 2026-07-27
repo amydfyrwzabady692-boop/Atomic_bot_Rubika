@@ -28,7 +28,7 @@ def keypad(rows: list[list[tuple[str, str]]]) -> dict:
 def main_menu() -> dict:
     return keypad(
         [
-            [("gems", "💎 جم فری‌فایر"), ("wallet", "💰 کیف پول")],
+            [("gems", "🎮 محصولات فری‌فایر"), ("wallet", "💰 کیف پول")],
             [("orders", "📦 سفارش‌های من"), ("account", "👤 حساب من")],
             [("store", "🛍 فروشگاه اکانت"), ("sense", "🎯 پک سنس")],
             [("promo", "🎁 ثبت کد"), ("support", "🎧 پشتیبانی")],
