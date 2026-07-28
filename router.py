@@ -437,22 +437,15 @@ class Router:
             for r in rows[start:start + per_page]
         ]
         if total_pages > 1:
-            navigation = []
-            if page > 1:
-                navigation.append(
-                    (
-                        f"products_page:{kind}:{page - 1}",
-                        "◀️ قبلی",
-                    )
+            navigation = [
+                (
+                    "noop"
+                    if number == page
+                    else f"products_page:{kind}:{number}",
+                    f"• {number} •" if number == page else str(number),
                 )
-            navigation.append(("noop", f"{page} / {total_pages}"))
-            if page < total_pages:
-                navigation.append(
-                    (
-                        f"products_page:{kind}:{page + 1}",
-                        "بعدی ▶️",
-                    )
-                )
+                for number in range(1, total_pages + 1)
+            ]
             buttons.append(navigation)
         buttons.append([("home", "🏠 بازگشت")])
         await self.send(
