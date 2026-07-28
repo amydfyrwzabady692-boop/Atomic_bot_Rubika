@@ -269,11 +269,11 @@ SELECT * FROM (VALUES
  ('gem','🎯 لول‌آپ سطح 30',30,'Level Up Package - Level 30',172000,9999),
  ('gem','💎 110 جم',110,'110',191000,9999),
  ('gem','💎 231 جم',231,'231',382000,9999),
- ('gem','📅 عضویت هفتگی',90001,'Weekly Membership',430000,9999),
+ ('gem','📅 بسته هفتگی',90001,'Weekly Membership',430000,9999),
  ('gem','🏆 بویاه پس',90002,'Booyah Pass',640000,9999),
  ('gem','💎 583 جم',583,'583',956000,9999),
  ('gem','💎 1188 جم',1188,'1188',1913000,9999),
- ('gem','📆 عضویت ماهانه',90003,'Monthly Membership',2106000,9999),
+ ('gem','📆 بسته ماهانه',90003,'Monthly Membership',2106000,9999),
  ('gem','💎 2420 جم',2420,'2420',3824000,9999)
 ) AS seed(kind,title,amount,supplier_sku,price,stock)
 WHERE NOT EXISTS (SELECT 1 FROM products);
@@ -373,11 +373,11 @@ BEGIN
       ('Level Up Package - Level 30','🎯 لول‌آپ سطح 30'),
       ('110','💎 110 جم'),
       ('231','💎 231 جم'),
-      ('Weekly Membership','📅 عضویت هفتگی'),
+      ('Weekly Membership','📅 بسته هفتگی'),
       ('Booyah Pass','🏆 بویاه پس'),
       ('583','💎 583 جم'),
       ('1188','💎 1188 جم'),
-      ('Monthly Membership','📆 عضویت ماهانه'),
+      ('Monthly Membership','📆 بسته ماهانه'),
       ('2420','💎 2420 جم')
     ) AS approved(sku,display_title)
     LOOP
@@ -390,3 +390,25 @@ BEGIN
     ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
   END IF;
 END $titles$;
+
+DO $package_titles$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings
+    WHERE key='g2bulk_package_titles_fa_v3_20260728'
+  ) THEN
+    UPDATE products SET title='📅 بسته هفتگی'
+    WHERE kind='gem' AND supplier_sku='Weekly Membership';
+    UPDATE products SET title='📆 بسته ماهانه'
+    WHERE kind='gem' AND supplier_sku='Monthly Membership';
+    INSERT INTO settings(key,value)
+    VALUES('g2bulk_package_titles_fa_v3_20260728','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $package_titles$;
+
+-- Older versions retried provider calls automatically. Their outcome may be
+-- ambiguous, so quarantine them for reconciliation instead of resubmitting.
+UPDATE fulfillments
+SET status='SUBMIT_UNKNOWN',next_retry_at=NULL,updated_at=now()
+WHERE status='RETRY' AND provider_order_id IS NULL;

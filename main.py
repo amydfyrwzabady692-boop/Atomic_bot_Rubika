@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import html
 import logging
 
@@ -11,7 +10,7 @@ from keyboards import inline
 from payments import Zarinpal
 from router import Router
 from rubika_api import RubikaAPI, normalize_event
-from supplier import G2Bulk, usd_toman_rate
+from supplier import G2Bulk, g2_idempotency_key, usd_toman_rate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,45 +216,88 @@ class Application:
                             )
                     await asyncio.sleep(3)
                     continue
+                unknown = await self.db.pool.fetchrow(
+                    """SELECT f.order_id,u.chat_id
+                       FROM fulfillments f
+                       JOIN orders o ON o.id=f.order_id
+                       JOIN users u ON u.id=o.user_id
+                       WHERE f.status IN ('SUBMITTING','SUBMIT_UNKNOWN')
+                         AND f.provider_order_id IS NULL
+                         AND f.updated_at<=now()-interval '30 seconds'
+                       ORDER BY f.updated_at LIMIT 1"""
+                )
+                if unknown:
+                    recovered = await self.g2.find_order_by_remark(
+                        f"rubika-{unknown['order_id']}"
+                    )
+                    if recovered.get("found"):
+                        provider_status = recovered["status"]
+                        if provider_status == "COMPLETED":
+                            order_status = "completed"
+                        elif provider_status == "FAILED":
+                            order_status = "delivery_failed"
+                        else:
+                            order_status = "processing"
+                        async with self.db.pool.acquire() as conn:
+                            async with conn.transaction():
+                                await conn.execute(
+                                    """UPDATE fulfillments
+                                       SET provider_order_id=$1,status=$2,
+                                           error=NULL,updated_at=now()
+                                       WHERE order_id=$3
+                                         AND status IN ('SUBMITTING','SUBMIT_UNKNOWN')""",
+                                    recovered["provider_order_id"],
+                                    provider_status,
+                                    unknown["order_id"],
+                                )
+                                await conn.execute(
+                                    """UPDATE orders SET status=$1,player_name=$2
+                                       WHERE id=$3""",
+                                    order_status,
+                                    recovered.get("player_name") or "",
+                                    unknown["order_id"],
+                                )
+                        if provider_status == "COMPLETED":
+                            await self.api.send_message(
+                                unknown["chat_id"],
+                                f"✅ سفارش #{unknown['order_id']} با موفقیت انجام شد.",
+                            )
+                    else:
+                        await self.db.pool.execute(
+                            """UPDATE fulfillments
+                               SET status='SUBMIT_UNKNOWN',updated_at=now()
+                               WHERE order_id=$1
+                                 AND status IN ('SUBMITTING','SUBMIT_UNKNOWN')""",
+                            unknown["order_id"],
+                        )
+                    await asyncio.sleep(3)
+                    continue
                 row = await self.db.pool.fetchrow(
                     """SELECT o.id,o.player_id,
                               o.total_amount-o.discount_amount sale_toman,
                               p.supplier_sku,p.supplier_cost_usd,u.chat_id,
-                              f.id fulfillment_id,f.attempts
+                              f.id fulfillment_id
                        FROM orders o
                        JOIN order_items i ON i.order_id=o.id
                        JOIN products p ON p.id=i.product_id
                        JOIN users u ON u.id=o.user_id
                        LEFT JOIN fulfillments f ON f.order_id=o.id
                        WHERE o.status='paid' AND p.kind='gem'
-                         AND (
-                           f.id IS NULL OR (
-                             f.status='RETRY'
-                             AND (f.next_retry_at IS NULL OR f.next_retry_at<=now())
-                           )
-                         )
+                         AND f.id IS NULL
                        ORDER BY o.id LIMIT 1"""
                 )
                 if not row:
                     await asyncio.sleep(5)
                     continue
-                idem = hashlib.sha256(f"atomic-rubika:{row['id']}".encode()).hexdigest()
-                if row["fulfillment_id"]:
-                    claimed = await self.db.pool.fetchval(
-                        """UPDATE fulfillments SET status='PROCESSING',
-                           attempts=attempts+1,updated_at=now()
-                           WHERE id=$1 AND status='RETRY' RETURNING id""",
-                        row["fulfillment_id"],
-                    )
-                else:
-                    claimed = await self.db.pool.fetchval(
-                        """INSERT INTO fulfillments(
-                             order_id,provider,idempotency_key,status,attempts
-                           ) VALUES($1,'g2bulk',$2,'PROCESSING',1)
-                           ON CONFLICT(order_id) DO NOTHING RETURNING id""",
-                        row["id"],
-                        idem,
-                    )
+                idem = g2_idempotency_key(row["id"])
+                claimed = await self.db.pool.fetchval(
+                    """INSERT INTO fulfillments(
+                         order_id,provider,idempotency_key,status,attempts
+                       ) VALUES($1,'g2bulk',$2,'SUBMITTING',1)
+                       ON CONFLICT(order_id) DO NOTHING RETURNING id""",
+                    row["id"],
+                    idem,
+                )
                 if not claimed:
                     continue
                 result = await self.g2.order(row["supplier_sku"], row["player_id"], row["id"])
@@ -309,19 +351,31 @@ class Application:
                             f"⏳ سفارش #{row['id']} برای تحویل ارسال شد.",
                         )
                 else:
-                    attempts = int(row["attempts"] or 0) + 1
-                    retrying = attempts < 5
+                    uncertain = bool(result.get("uncertain"))
+                    fulfillment_status = (
+                        "SUBMIT_UNKNOWN" if uncertain else "REJECTED"
+                    )
                     await self.db.pool.execute(
                         """UPDATE fulfillments SET status=$1,error=$2,
-                           next_retry_at=CASE WHEN $1='RETRY'
-                             THEN now()+make_interval(mins => LEAST(attempts*2,30))
-                             ELSE NULL END,
+                           next_retry_at=NULL,
                            updated_at=now() WHERE order_id=$3""",
-                        "RETRY" if retrying else "FAILED",
+                        fulfillment_status,
                         result.get("error", "")[:1000],
                         row["id"],
                     )
-                    if not retrying:
+                    if uncertain:
+                        await self.db.pool.execute(
+                            """UPDATE orders SET status='processing'
+                               WHERE id=$1 AND status='paid'""",
+                            row["id"],
+                        )
+                        await self.api.send_message(
+                            self.config.admin_chat_id,
+                            f"🚨 وضعیت ثبت سفارش #{row['id']} در G2Bulk نامشخص است.\n"
+                            "ارسال مجدد خودکار متوقف شد؛ ابتدا سفارش‌های G2Bulk را تطبیق بده.\n"
+                            f"خطا: {result.get('error')}",
+                        )
+                    else:
                         await self.db.pool.execute(
                             """UPDATE orders SET status='delivery_failed'
                                WHERE id=$1 AND status='paid'""",
@@ -329,7 +383,7 @@ class Application:
                         )
                         await self.api.send_message(
                             self.config.admin_chat_id,
-                            f"⚠️ تحویل سفارش #{row['id']} پس از ۵ تلاش ناموفق بود:\n"
+                            f"⚠️ تأمین‌کننده سفارش #{row['id']} را قطعی رد کرد:\n"
                             f"{result.get('error')}",
                         )
             except asyncio.CancelledError:

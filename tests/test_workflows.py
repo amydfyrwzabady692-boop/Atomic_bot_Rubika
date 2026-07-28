@@ -118,6 +118,14 @@ class PaymentGateway:
         return "A0001", "https://payment.example/A0001", None
 
 
+class ProductDatabase:
+    async def products(self, _kind):
+        return [
+            {"id": i, "title": f"بسته {i}", "price": i * 1000}
+            for i in range(1, 15)
+        ]
+
+
 class AsyncContext:
     def __init__(self, value):
         self.value = value
@@ -206,6 +214,33 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("receipt_review:ok:7", button_ids)
         self.assertIn("receipt_review:no:7", button_ids)
         self.assertNotIn("receipt_apply:ok:7", button_ids)
+
+    def test_fourteen_gem_products_are_split_into_two_pages(self):
+        router, api = self.make_router(ProductDatabase())
+        asyncio.run(
+            router.show_products(
+                {"chat_id": "user-chat"}, "gem", "محصولات", page=1
+            )
+        )
+        keypad = api.messages[-1][2]["inline_keypad"]
+        ids = [
+            button["id"]
+            for row in keypad["rows"]
+            for button in row["buttons"]
+        ]
+        self.assertEqual(ids[:7], [f"product:{i}:1" for i in range(1, 8)])
+        self.assertIn("products_page:gem:2", ids)
+        self.assertNotIn("product:8:1", ids)
+
+    def test_fulfillment_worker_never_auto_retries_ambiguous_submission(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn("SUBMIT_UNKNOWN", source)
+        self.assertIn("find_order_by_remark", source)
+        worker = source[
+            source.index("async def fulfillment_loop"):
+            source.index("async def cleanup_loop")
+        ]
+        self.assertNotIn("f.status='RETRY'", worker)
 
     def test_receipt_review_requires_a_second_confirmation(self):
         router, api = self.make_router(ActionDatabase())

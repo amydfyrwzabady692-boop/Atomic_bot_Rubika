@@ -3,6 +3,7 @@ import inspect
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT))
@@ -12,7 +13,7 @@ from keyboards import admin_menu, link_button, main_menu
 from payment_safety import checked_amount, order_amounts, valid_card_number
 from router import Router
 from rubika_api import normalize_event
-from supplier import g2_idempotency_key
+from supplier import G2Bulk, g2_idempotency_key
 
 
 class EventTests(unittest.TestCase):
@@ -72,6 +73,47 @@ class FinancialTests(unittest.TestCase):
         first = g2_idempotency_key(42)
         self.assertEqual(first, g2_idempotency_key(42))
         self.assertEqual(len(first), 36)
+
+    def test_ambiguous_g2_submission_is_not_a_safe_failure(self):
+        supplier = G2Bulk()
+        supplier.key = "test-key"
+        with patch.object(
+            supplier,
+            "_call",
+            AsyncMock(
+                return_value={
+                    "success": False,
+                    "message": "timeout",
+                    "_transport_uncertain": True,
+                }
+            ),
+        ):
+            result = asyncio.run(supplier.order("110", "12345", 91))
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["uncertain"])
+
+    def test_ambiguous_order_can_be_recovered_by_exact_remark(self):
+        supplier = G2Bulk()
+        supplier.key = "test-key"
+        with patch.object(
+            supplier,
+            "_call",
+            AsyncMock(
+                return_value={
+                    "success": True,
+                    "orders": [
+                        {
+                            "order_id": 1255767,
+                            "remark": "rubika-91",
+                            "status": "COMPLETED",
+                        }
+                    ],
+                }
+            ),
+        ):
+            result = asyncio.run(supplier.find_order_by_remark("rubika-91"))
+        self.assertTrue(result["found"])
+        self.assertEqual(result["provider_order_id"], "1255767")
 
     def test_card_number_checksum(self):
         self.assertTrue(valid_card_number("6037 9912 3456 7893"))
@@ -214,6 +256,8 @@ class SchemaTests(unittest.TestCase):
             schema,
         )
         self.assertIn("g2bulk_catalogue_titles_fa_v2_20260727", schema)
+        self.assertIn("g2bulk_package_titles_fa_v3_20260728", schema)
+        self.assertIn("status='SUBMIT_UNKNOWN'", schema)
 
 
 if __name__ == "__main__":

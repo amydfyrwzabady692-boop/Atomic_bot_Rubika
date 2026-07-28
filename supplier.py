@@ -69,9 +69,21 @@ class G2Bulk:
                 async with session.request(
                     method, self.base + path, json=body, headers=headers
                 ) as response:
-                    return await response.json(content_type=None)
+                    data = await response.json(content_type=None)
+                    if not isinstance(data, dict):
+                        data = {"success": False, "message": str(data)}
+                    if (
+                        method.upper() != "GET"
+                        and (response.status in {408, 429} or response.status >= 500)
+                    ):
+                        data["_transport_uncertain"] = True
+                    return data
         except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-            return {"success": False, "message": str(exc)}
+            return {
+                "success": False,
+                "message": str(exc),
+                "_transport_uncertain": method.upper() != "GET",
+            }
 
     async def order(self, sku, player_id, order_id):
         idem = g2_idempotency_key(order_id)
@@ -97,6 +109,7 @@ class G2Bulk:
             if not provider_order_id:
                 return {
                     "ok": False,
+                    "uncertain": True,
                     "idempotency_key": idem,
                     "error": "تأمین‌کننده شناسه سفارش برنگرداند.",
                 }
@@ -110,9 +123,44 @@ class G2Bulk:
             }
         return {
             "ok": False,
+            "uncertain": bool(data.get("_transport_uncertain")),
             "idempotency_key": idem,
             "error": data.get("message") or "خطای تامین‌کننده",
         }
+
+    async def find_order_by_remark(self, remark):
+        """Reconcile an ambiguous submission without placing another order."""
+        remark = str(remark or "").strip()
+        if not self.key or not remark:
+            return {"ok": False, "found": False}
+        data = await self._call("GET", "/games/orders?page=1&limit=100")
+        if not data.get("success"):
+            return {
+                "ok": False,
+                "found": False,
+                "error": data.get("message") or "دریافت سفارش‌های تأمین‌کننده ناموفق بود.",
+            }
+        nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+        for order in data.get("orders") or nested.get("orders") or []:
+            if str(order.get("remark") or "").strip() != remark:
+                continue
+            provider_order_id = str(
+                order.get("order_id") or order.get("id") or ""
+            ).strip()
+            if not provider_order_id:
+                continue
+            status = str(order.get("status") or "PENDING").upper()
+            if status == "CANCELED":
+                status = "FAILED"
+            return {
+                "ok": True,
+                "found": True,
+                "provider_order_id": provider_order_id,
+                "status": status,
+                "player_name": order.get("player_name") or "",
+                "cost_usd": order.get("price") or order.get("total_price"),
+            }
+        return {"ok": True, "found": False}
 
     async def check_player(self, player_id: str):
         if not self.key:

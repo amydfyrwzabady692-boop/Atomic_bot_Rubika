@@ -95,12 +95,36 @@ class Router:
         if action.startswith("/") and is_admin:
             await self.admin_command(event, action)
             return
+        if action == "noop":
+            return
+        if action.startswith("products_page:"):
+            match = re.fullmatch(
+                r"products_page:(gem|sense_mobile|sense_pc):([1-9]\d*)",
+                action,
+            )
+            if not match:
+                await self.send(event["chat_id"], "❌ صفحه محصول نامعتبر است.")
+                return
+            titles = {
+                "gem": "🎮 محصولات فری‌فایر",
+                "sense_mobile": "📱 سنسیویتی موبایل",
+                "sense_pc": "🖥 سنسیویتی PC",
+            }
+            await self.show_products(
+                event, match.group(1), titles[match.group(1)], int(match.group(2))
+            )
+            return
         if action.startswith("product:"):
-            product_arg = action.removeprefix("product:")
-            if not product_arg.isdigit():
+            match = re.fullmatch(r"product:([1-9]\d*)(?::([1-9]\d*))?", action)
+            if not match:
                 await self.send(event["chat_id"], "❌ شناسه محصول نامعتبر است.")
                 return
-            await self.product_selected(event, user, int(product_arg))
+            await self.product_selected(
+                event,
+                user,
+                int(match.group(1)),
+                int(match.group(2) or 1),
+            )
             return
         if action.startswith("gem_buy:"):
             product_arg = action.removeprefix("gem_buy:")
@@ -394,20 +418,50 @@ class Router:
             ),
         )
 
-    async def show_products(self, event, kind, title):
+    async def show_products(self, event, kind, title, page=1):
         rows = await self.db.products(kind)
         if not rows:
             await self.send(event["chat_id"], "فعلاً محصول فعالی موجود نیست.")
             return
-        buttons = [[(f"product:{r['id']}", f"{r['title']} — {r['price']:,} تومان")] for r in rows]
+        per_page = 7
+        total_pages = max(1, (len(rows) + per_page - 1) // per_page)
+        page = max(1, min(int(page), total_pages))
+        start = (page - 1) * per_page
+        buttons = [
+            [
+                (
+                    f"product:{r['id']}:{page}",
+                    f"{r['title']} — {r['price']:,} تومان",
+                )
+            ]
+            for r in rows[start:start + per_page]
+        ]
+        if total_pages > 1:
+            navigation = []
+            if page > 1:
+                navigation.append(
+                    (
+                        f"products_page:{kind}:{page - 1}",
+                        "◀️ قبلی",
+                    )
+                )
+            navigation.append(("noop", f"{page} / {total_pages}"))
+            if page < total_pages:
+                navigation.append(
+                    (
+                        f"products_page:{kind}:{page + 1}",
+                        "بعدی ▶️",
+                    )
+                )
+            buttons.append(navigation)
         buttons.append([("home", "🏠 بازگشت")])
         await self.send(
             event["chat_id"],
-            f"{title}\n\nمحصول موردنظرت را انتخاب کن 👇",
+            f"{title}\nبسته موردنظرت را انتخاب کن — صفحه {page} از {total_pages} 👇",
             buttons=inline(buttons),
         )
 
-    async def product_selected(self, event, user, product_id):
+    async def product_selected(self, event, user, product_id, page=1):
         if await self.db.setting("sales_enabled", "1") != "1":
             await self.send(event["chat_id"], "⛔ فروش موقتاً متوقف شده است.")
             return
@@ -424,9 +478,9 @@ class Router:
             elif supplier_sku.startswith("Level Up Package"):
                 product_line = "🎯 نوع بسته: ارتقای سطح"
             elif supplier_sku == "Weekly Membership":
-                product_line = "📅 اعتبار: عضویت هفتگی"
+                product_line = "📅 نوع بسته: هفتگی"
             elif supplier_sku == "Monthly Membership":
-                product_line = "📆 اعتبار: عضویت ماهانه"
+                product_line = "📆 نوع بسته: ماهانه"
             elif supplier_sku == "Booyah Pass":
                 product_line = "🏆 نوع محصول: بویاه پس"
             else:
@@ -440,7 +494,7 @@ class Router:
                 buttons=inline(
                     [
                         [(f"gem_buy:{product_id}", "✅ خرید این بسته")],
-                        [("gems", "🔙 بازگشت به فهرست")],
+                        [(f"products_page:gem:{max(1, int(page))}", "🔙 بازگشت به فهرست")],
                     ]
                 ),
             )
