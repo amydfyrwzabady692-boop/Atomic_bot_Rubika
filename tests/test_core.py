@@ -115,6 +115,57 @@ class FinancialTests(unittest.TestCase):
         self.assertTrue(result["found"])
         self.assertEqual(result["provider_order_id"], "1255767")
 
+    def test_status_uses_numeric_provider_id_and_accepts_nested_payload(self):
+        supplier = G2Bulk()
+        supplier.key = "test-key"
+        call = AsyncMock(
+            return_value={
+                "success": True,
+                "data": {
+                    "order": {
+                        "status": "COMPLETED",
+                        "player_name": "Player",
+                    }
+                },
+            }
+        )
+        with patch.object(supplier, "_call", call):
+            result = asyncio.run(supplier.status("1259759"))
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["player_name"], "Player")
+        self.assertEqual(
+            call.await_args_list[0].args,
+            ("POST", "/games/order/status", {"order_id": 1259759}),
+        )
+
+    def test_status_reconciles_against_order_history_without_resubmitting(self):
+        supplier = G2Bulk()
+        supplier.key = "test-key"
+        call = AsyncMock(
+            side_effect=[
+                {"success": False, "message": "unknown response"},
+                {"success": False, "message": "unknown response"},
+                {
+                    "success": True,
+                    "orders": [
+                        {
+                            "order_id": 1259759,
+                            "status": "COMPLETED",
+                            "player_name": "Player",
+                        }
+                    ],
+                },
+            ]
+        )
+        with patch.object(supplier, "_call", call):
+            result = asyncio.run(supplier.status("1259759"))
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(call.await_args_list[-1].args[0], "GET")
+        self.assertTrue(
+            all(args.args[0] != "POST" or args.args[1] == "/games/order/status"
+                for args in call.await_args_list)
+        )
+
     def test_card_number_checksum(self):
         self.assertTrue(valid_card_number("6037 9912 3456 7893"))
         self.assertFalse(valid_card_number("6037991234567890"))
@@ -243,6 +294,8 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("pending_discounts", schema)
         self.assertIn("inventory_reserved", schema)
         self.assertIn("next_retry_at", schema)
+        self.assertIn("user_notified_at", schema)
+        self.assertIn("admin_notified_at", schema)
         self.assertIn("payments_enabled", schema)
         self.assertIn("telegram_catalog_20260726", schema)
         self.assertIn("g2bulk_catalogue_14_20260727", schema)

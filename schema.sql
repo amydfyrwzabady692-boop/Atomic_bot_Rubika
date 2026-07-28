@@ -201,6 +201,28 @@ ALTER TABLE fulfillments
   ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE fulfillments
   ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+ALTER TABLE fulfillments
+  ADD COLUMN IF NOT EXISTS user_notified_at TIMESTAMPTZ;
+ALTER TABLE fulfillments
+  ADD COLUMN IF NOT EXISTS admin_notified_at TIMESTAMPTZ;
+DO $notification_outbox$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings
+    WHERE key='fulfillment_notification_outbox_v1'
+  ) THEN
+    -- Existing terminal rows predate the durable outbox and may already have
+    -- been announced. Backfill them to avoid replaying old notifications.
+    UPDATE fulfillments
+    SET user_notified_at=COALESCE(user_notified_at,now()),
+        admin_notified_at=COALESCE(admin_notified_at,now())
+    WHERE status IN ('COMPLETED','FAILED');
+
+    INSERT INTO settings(key,value)
+    VALUES('fulfillment_notification_outbox_v1','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $notification_outbox$;
 CREATE TABLE IF NOT EXISTS audit_logs (
   id BIGSERIAL PRIMARY KEY,
   admin_id TEXT NOT NULL,

@@ -94,10 +94,32 @@ class Database:
                     user_id,
                 )
                 old_orders = await conn.fetch(
-                    """SELECT id,wallet_paid FROM orders
-                       WHERE user_id=$1 AND status='pending' FOR UPDATE""",
+                    """SELECT o.id,o.wallet_paid,
+                              EXISTS(
+                                SELECT 1 FROM payments p
+                                WHERE p.order_id=o.id
+                                  AND p.provider='gateway'
+                                  AND p.authority IS NOT NULL
+                                  AND p.status IN ('pending','cancelled','expired')
+                              ) gateway_issued,
+                              EXISTS(
+                                SELECT 1 FROM payments p
+                                JOIN receipts r ON r.payment_id=p.id
+                                WHERE p.order_id=o.id
+                                  AND r.status='pending'
+                              ) receipt_pending
+                       FROM orders o
+                       WHERE o.user_id=$1 AND o.status='pending' FOR UPDATE""",
                     user_id,
                 )
+                if any(
+                    old["gateway_issued"] or old["receipt_pending"]
+                    for old in old_orders
+                ):
+                    raise ValueError(
+                        "یک سفارش با لینک درگاه یا رسیدِ در انتظار داری؛ "
+                        "ابتدا نتیجه همان پرداخت باید مشخص شود."
+                    )
                 for old in old_orders:
                     if old["wallet_paid"]:
                         reference = f"cancel-order:{old['id']}:wallet-refund"
@@ -501,6 +523,26 @@ class Database:
                 )
                 if not order or order["status"] != "pending":
                     raise ValueError("سفارش قابل لغو نیست.")
+                external_payment = await conn.fetchval(
+                    """SELECT 1 FROM payments
+                       WHERE order_id=$1 AND provider='gateway'
+                         AND authority IS NOT NULL
+                         AND status IN ('pending','cancelled','expired')
+                       LIMIT 1""",
+                    order_id,
+                )
+                pending_receipt = await conn.fetchval(
+                    """SELECT 1 FROM payments p
+                       JOIN receipts r ON r.payment_id=p.id
+                       WHERE p.order_id=$1 AND r.status='pending'
+                       LIMIT 1""",
+                    order_id,
+                )
+                if external_payment or pending_receipt:
+                    raise ValueError(
+                        "این سفارش لینک درگاه یا رسیدِ در انتظار دارد و تا تعیین "
+                        "نتیجه پرداخت قابل لغو نیست."
+                    )
                 refunded = int(order["wallet_paid"])
                 if refunded:
                     reference = f"cancel-order:{order_id}:wallet-refund"
@@ -598,6 +640,11 @@ class Database:
                        JOIN users u ON u.id=o.user_id
                        WHERE o.status='pending'
                          AND o.created_at<now()-interval '1 hour'
+                         AND NOT EXISTS (
+                           SELECT 1 FROM payments p
+                           JOIN receipts r ON r.payment_id=p.id
+                           WHERE p.order_id=o.id AND r.status='pending'
+                         )
                        FOR UPDATE OF o"""
                 )
                 for order in rows:

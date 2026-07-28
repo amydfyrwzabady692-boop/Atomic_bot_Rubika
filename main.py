@@ -115,9 +115,106 @@ class Application:
                 log.exception("Polling failed")
                 await asyncio.sleep(5)
 
+    async def deliver_fulfillment_notifications(self):
+        """Retry final supplier notifications until each recipient receives one."""
+        row = await self.db.pool.fetchrow(
+            """SELECT f.order_id,f.provider_order_id,f.status,
+                      f.user_notified_at,f.admin_notified_at,
+                      u.chat_id,u.rubika_id,p.title
+               FROM fulfillments f
+               JOIN orders o ON o.id=f.order_id
+               JOIN users u ON u.id=o.user_id
+               JOIN order_items i ON i.order_id=o.id
+               JOIN products p ON p.id=i.product_id
+               WHERE f.provider='g2bulk'
+                 AND f.status IN ('COMPLETED','FAILED')
+                 AND (
+                   f.user_notified_at IS NULL
+                   OR f.admin_notified_at IS NULL
+                 )
+               ORDER BY f.updated_at,f.order_id
+               LIMIT 1"""
+        )
+        if not row:
+            return False
+
+        completed = row["status"] == "COMPLETED"
+        if row["user_notified_at"] is None:
+            if completed:
+                user_text = (
+                    f"✅ سفارش #{row['order_id']} با موفقیت تکمیل شد و محصول "
+                    "برای اکانت شما واریز شد."
+                )
+            else:
+                user_text = (
+                    f"⚠️ تحویل خودکار سفارش #{row['order_id']} با مشکل روبه‌رو شد. "
+                    "پرداخت شما ثبت است و سفارش برای بررسی ایمن به پشتیبانی ارجاع شد."
+                )
+            try:
+                if row["chat_id"]:
+                    await self.api.send_message(row["chat_id"], user_text)
+                await self.db.pool.execute(
+                    """UPDATE fulfillments
+                       SET user_notified_at=COALESCE(user_notified_at,now())
+                       WHERE order_id=$1 AND status=$2""",
+                    row["order_id"],
+                    row["status"],
+                )
+            except Exception:
+                log.exception(
+                    "Could not notify Rubika user for supplier order %s",
+                    row["order_id"],
+                )
+                await self.db.pool.execute(
+                    "UPDATE fulfillments SET updated_at=now() WHERE order_id=$1",
+                    row["order_id"],
+                )
+
+        if row["admin_notified_at"] is None:
+            if completed:
+                admin_text = (
+                    f"✅ سفارش #{row['order_id']} در G2Bulk تکمیل شد.\n"
+                    f"محصول: {row['title']}\n"
+                    f"کاربر: {row['rubika_id']}\n"
+                    f"شناسه G2Bulk: {row['provider_order_id'] or '-'}"
+                )
+            else:
+                admin_text = (
+                    f"⚠️ تحویل سفارش #{row['order_id']} در G2Bulk ناموفق اعلام شد.\n"
+                    f"محصول: {row['title']}\n"
+                    f"کاربر: {row['rubika_id']}\n"
+                    f"شناسه G2Bulk: {row['provider_order_id'] or '-'}\n"
+                    "قبل از هر تلاش دستی، وضعیت سفارش تأمین‌کننده را بررسی کن."
+                )
+            try:
+                await self.api.send_message(
+                    self.config.admin_chat_id,
+                    admin_text,
+                )
+                await self.db.pool.execute(
+                    """UPDATE fulfillments
+                       SET admin_notified_at=COALESCE(admin_notified_at,now())
+                       WHERE order_id=$1 AND status=$2""",
+                    row["order_id"],
+                    row["status"],
+                )
+            except Exception:
+                log.exception(
+                    "Could not notify Rubika admin for supplier order %s",
+                    row["order_id"],
+                )
+                await self.db.pool.execute(
+                    "UPDATE fulfillments SET updated_at=now() WHERE order_id=$1",
+                    row["order_id"],
+                )
+        return True
+
     async def fulfillment_loop(self):
         while True:
             try:
+                if await self.deliver_fulfillment_notifications():
+                    await asyncio.sleep(1)
+                    continue
                 manual = await self.db.pool.fetchrow(
                     """SELECT o.id,u.chat_id,u.rubika_id,p.title,p.kind,
                               f.id fulfillment_id
@@ -201,18 +298,10 @@ class Application:
                                 "UPDATE orders SET status='completed' WHERE id=$1",
                                 pending["order_id"],
                             )
-                            await self.api.send_message(
-                                pending["chat_id"],
-                                f"✅ سفارش #{pending['order_id']} با موفقیت انجام شد.",
-                            )
                         elif status == "FAILED":
                             await self.db.pool.execute(
                                 "UPDATE orders SET status='delivery_failed' WHERE id=$1",
                                 pending["order_id"],
-                            )
-                            await self.api.send_message(
-                                self.config.admin_chat_id,
-                                f"⚠️ تحویل سفارش #{pending['order_id']} ناموفق شد.",
                             )
                     await asyncio.sleep(3)
                     continue
@@ -257,11 +346,6 @@ class Application:
                                     recovered.get("player_name") or "",
                                     unknown["order_id"],
                                 )
-                        if provider_status == "COMPLETED":
-                            await self.api.send_message(
-                                unknown["chat_id"],
-                                f"✅ سفارش #{unknown['order_id']} با موفقیت انجام شد.",
-                            )
                     else:
                         await self.db.pool.execute(
                             """UPDATE fulfillments
@@ -340,12 +424,7 @@ class Application:
                             row["sale_toman"] - cost_toman,
                             rate["source"],
                         )
-                    if provider_status == "COMPLETED":
-                        await self.api.send_message(
-                            row["chat_id"],
-                            f"✅ سفارش #{row['id']} با موفقیت انجام شد.",
-                        )
-                    else:
+                    if provider_status != "COMPLETED":
                         await self.api.send_message(
                             row["chat_id"],
                             f"⏳ سفارش #{row['id']} برای تحویل ارسال شد.",
@@ -401,7 +480,12 @@ class Application:
                 )
                 await self.db.pool.execute(
                     """UPDATE payments SET status='expired'
-                       WHERE status='pending' AND expires_at<now()"""
+                       WHERE status='pending' AND expires_at<now()
+                         AND NOT EXISTS (
+                           SELECT 1 FROM receipts r
+                           WHERE r.payment_id=payments.id
+                             AND r.status='pending'
+                         )"""
                 )
                 await self.db.pool.execute(
                     """UPDATE receipts r SET status='rejected',reviewed_at=now()

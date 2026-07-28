@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 import unittest
 from datetime import UTC, datetime
@@ -120,9 +121,30 @@ class PaymentGateway:
 
 class ProductDatabase:
     async def products(self, _kind):
+        skus = [
+            "Level Up Package - Level 6",
+            "Level Up Package - Level 10",
+            "Level Up Package - Level 15",
+            "Level Up Package - Level 20",
+            "Level Up Package - Level 25",
+            "Level Up Package - Level 30",
+            "110",
+            "231",
+            "Weekly Membership",
+            "Booyah Pass",
+            "583",
+            "1188",
+            "Monthly Membership",
+            "2420",
+        ]
         return [
-            {"id": i, "title": f"بسته {i}", "price": i * 1000}
-            for i in range(1, 15)
+            {
+                "id": i,
+                "title": f"بسته {i}",
+                "price": i * 1000,
+                "supplier_sku": sku,
+            }
+            for i, sku in enumerate(skus, start=1)
         ]
 
 
@@ -215,7 +237,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("receipt_review:no:7", button_ids)
         self.assertNotIn("receipt_apply:ok:7", button_ids)
 
-    def test_fourteen_gem_products_are_split_into_two_pages(self):
+    def test_gems_and_memberships_are_page_one_and_level_ups_page_two(self):
         router, api = self.make_router(ProductDatabase())
         asyncio.run(
             router.show_products(
@@ -228,9 +250,24 @@ class WorkflowTests(unittest.TestCase):
             for row in keypad["rows"]
             for button in row["buttons"]
         ]
-        self.assertEqual(ids[:7], [f"product:{i}:1" for i in range(1, 8)])
+        self.assertEqual(ids[:8], [f"product:{i}:1" for i in range(7, 15)])
         self.assertIn("products_page:gem:2", ids)
-        self.assertNotIn("product:8:1", ids)
+        self.assertNotIn("product:1:1", ids)
+
+        asyncio.run(
+            router.show_products(
+                {"chat_id": "user-chat"}, "gem", "محصولات", page=2
+            )
+        )
+        second_ids = [
+            button["id"]
+            for row in api.messages[-1][2]["inline_keypad"]["rows"]
+            for button in row["buttons"]
+        ]
+        self.assertEqual(
+            second_ids[:6],
+            [f"product:{i}:2" for i in range(1, 7)],
+        )
 
     def test_fulfillment_worker_never_auto_retries_ambiguous_submission(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -267,6 +304,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("inventory_reserved", source)
         self.assertIn("ON CONFLICT(reference) DO NOTHING", source)
         self.assertIn("isolation=\"serializable\"", source)
+        self.assertIn("gateway_issued", source)
+        self.assertIn("receipt_pending", source)
+        self.assertIn("یک سفارش با لینک درگاه", source)
+
+    def test_pending_receipt_is_not_expired_before_admin_review(self):
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        review_source = inspect.getsource(Router.review_receipt)
+        self.assertIn("r.status='pending'", database_source)
+        self.assertIn("r.status='pending'", worker_source)
+        self.assertNotIn('receipt["expires_at"] <= now', review_source)
+
+    def test_completed_supplier_notifications_use_a_durable_outbox(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn("deliver_fulfillment_notifications", source)
+        self.assertIn("user_notified_at", source)
+        self.assertIn("admin_notified_at", source)
+        self.assertIn("f.provider='g2bulk'", source)
 
     def test_partial_wallet_payment_only_spends_available_balance(self):
         connection = WalletConnection(balance=50_000, payable=200_000)

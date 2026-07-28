@@ -182,15 +182,107 @@ class G2Bulk:
         }
 
     async def status(self, provider_order_id):
+        provider_id = str(provider_order_id or "").strip()
+        if not self.key or not provider_id:
+            return {"ok": False, "error": "شناسه سفارش یا API key موجود نیست."}
+
+        valid_statuses = {
+            "PENDING",
+            "PROCESSING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELED",
+            "CANCELLED",
+            "REFUNDED",
+        }
+
+        def extract(response):
+            nested = (
+                response.get("data")
+                if isinstance(response.get("data"), dict)
+                else {}
+            )
+            order = (
+                response.get("order")
+                if isinstance(response.get("order"), dict)
+                else {}
+            )
+            if not order and isinstance(nested.get("order"), dict):
+                order = nested["order"]
+            if not order and nested.get("status"):
+                order = nested
+            status_value = str(
+                order.get("status")
+                or nested.get("status")
+                or response.get("status")
+                or ""
+            ).strip().upper()
+            player_name = str(
+                order.get("player_name")
+                or nested.get("player_name")
+                or response.get("player_name")
+                or ""
+            )
+            return status_value, player_name
+
+        request_id = int(provider_id) if provider_id.isdigit() else provider_id
         data = await self._call(
             "POST",
             "/games/order/status",
-            {"order_id": str(provider_order_id)},
+            {"order_id": request_id},
         )
-        order = data.get("order") if isinstance(data.get("order"), dict) else {}
-        status = str(order.get("status") or data.get("status") or "").upper()
-        if status == "CANCELED":
-            status = "FAILED"
-        if status in {"PENDING", "PROCESSING", "COMPLETED", "FAILED"}:
-            return {"ok": True, "status": status}
-        return {"ok": False, "error": data.get("message") or "وضعیت نامعتبر"}
+        status, player_name = extract(data)
+
+        if status not in valid_statuses and provider_id.isdigit():
+            alternate = await self._call(
+                "POST",
+                "/games/order/status",
+                {"order_id": provider_id},
+            )
+            alternate_status, alternate_player_name = extract(alternate)
+            if alternate_status:
+                data = alternate
+                status = alternate_status
+                player_name = alternate_player_name
+
+        if status in valid_statuses:
+            if status in {"CANCELED", "CANCELLED", "REFUNDED"}:
+                status = "FAILED"
+            return {
+                "ok": True,
+                "status": status,
+                "player_name": player_name,
+            }
+
+        # The status endpoint has returned different response shapes in
+        # production. Reconcile locally against the read-only order history;
+        # this path can never create or duplicate a supplier order.
+        history = await self._call("GET", "/games/orders?page=1&limit=100")
+        nested = (
+            history.get("data")
+            if isinstance(history.get("data"), dict)
+            else {}
+        )
+        orders = (
+            history.get("orders")
+            or nested.get("orders")
+            or (history.get("data") if isinstance(history.get("data"), list) else [])
+            or []
+        )
+        for item in orders:
+            item_id = str(item.get("order_id") or item.get("id") or "").strip()
+            if item_id != provider_id:
+                continue
+            history_status = str(item.get("status") or "").strip().upper()
+            if history_status in valid_statuses:
+                if history_status in {"CANCELED", "CANCELLED", "REFUNDED"}:
+                    history_status = "FAILED"
+                return {
+                    "ok": True,
+                    "status": history_status,
+                    "player_name": str(item.get("player_name") or ""),
+                }
+        return {
+            "ok": False,
+            "error": data.get("message") or "وضعیت سفارش G2Bulk قابل تشخیص نیست.",
+        }

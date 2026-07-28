@@ -11,6 +11,19 @@ from supplier import G2Bulk, usd_toman_rate
 
 log = logging.getLogger(__name__)
 
+GEM_PRODUCTS_PER_PAGE = 8
+
+
+def _ordered_gem_catalogue(rows):
+    """Show diamonds/memberships first and keep every Level Up pack on page 2."""
+    return sorted(
+        rows,
+        key=lambda row: str(row.get("supplier_sku") or "")
+        .strip()
+        .casefold()
+        .startswith("level up package"),
+    )
+
 WELCOME = """✨ به اتومیک شاپ روبیکا خوش اومدی! ✨
 
 اینجا جاییه که سرعت، امنیت و قیمت مناسب کنار هم جمع شدن تا خرید راحت‌تری داشته باشی 🚀
@@ -423,7 +436,11 @@ class Router:
         if not rows:
             await self.send(event["chat_id"], "فعلاً محصول فعالی موجود نیست.")
             return
-        per_page = 7
+        if kind == "gem":
+            rows = _ordered_gem_catalogue(rows)
+            per_page = GEM_PRODUCTS_PER_PAGE
+        else:
+            per_page = 7
         total_pages = max(1, (len(rows) + per_page - 1) // per_page)
         page = max(1, min(int(page), total_pages))
         start = (page - 1) * per_page
@@ -2106,11 +2123,9 @@ class Router:
                 if not receipt or receipt["status"] != "pending":
                     raise ValueError("رسید قبلاً بررسی شده یا وجود ندارد.")
                 if approved:
-                    now = await conn.fetchval("SELECT now()")
                     if (
                         receipt["provider"] != "card"
                         or receipt["payment_status"] != "pending"
-                        or receipt["expires_at"] <= now
                     ):
                         raise ValueError("پرداخت دیگر در وضعیت انتظار نیست.")
                     if receipt["purpose"] == "order" and (
