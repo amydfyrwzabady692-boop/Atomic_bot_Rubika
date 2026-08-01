@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import weakref
 
 from aiohttp import web
 
@@ -28,10 +29,14 @@ class Application:
         self.zarinpal = Zarinpal()
         self.g2 = G2Bulk()
         self.tasks: list[asyncio.Task] = []
+        self._update_slots = asyncio.Semaphore(20)
+        self._chat_locks = weakref.WeakValueDictionary()
 
     async def start(self):
         await self.db.start()
         await self.api.start()
+        await self.zarinpal.start()
+        await self.g2.start()
         me = await self.api.get_me()
         log.info("Rubika API connected: %s", me)
         if self.config.mode == "polling":
@@ -51,8 +56,33 @@ class Application:
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        await self.g2.close()
+        await self.zarinpal.close()
         await self.api.close()
         await self.db.close()
+
+    async def process_payload_ordered(self, payload):
+        """Allow parallel chats while preserving event order inside each chat."""
+        event = normalize_event(payload)
+        raw_update = (
+            payload.get("update")
+            if isinstance(payload, dict) and isinstance(payload.get("update"), dict)
+            else payload
+        )
+        chat_id = (
+            event.get("chat_id") if event
+            else str(raw_update.get("chat_id") or "")
+            if isinstance(raw_update, dict)
+            else ""
+        )
+        key = chat_id or f"payload:{id(payload)}"
+        lock = self._chat_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._chat_locks[key] = lock
+        async with self._update_slots:
+            async with lock:
+                await self.process_payload(payload)
 
     async def process_payload(self, payload):
         event = normalize_event(payload)
@@ -105,8 +135,11 @@ class Application:
             try:
                 response = await self.api.get_updates(offset)
                 data = response.get("data") if isinstance(response.get("data"), dict) else response
-                for update in data.get("updates") or []:
-                    await self.process_payload(update)
+                updates = data.get("updates") or []
+                if updates:
+                    await asyncio.gather(
+                        *(self.process_payload_ordered(update) for update in updates)
+                    )
                 offset = data.get("next_offset_id") or offset
                 await asyncio.sleep(1.5)
             except asyncio.CancelledError:
@@ -570,7 +603,7 @@ async def webhook(request):
         payload = await request.json()
     except (TypeError, ValueError):
         raise web.HTTPBadRequest() from None
-    asyncio.create_task(app_core.process_payload(payload))
+    asyncio.create_task(app_core.process_payload_ordered(payload))
     return web.json_response({"status": "ok"})
 
 

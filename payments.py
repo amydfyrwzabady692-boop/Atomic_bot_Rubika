@@ -10,6 +10,19 @@ class Zarinpal:
     def __init__(self):
         self.merchant = os.getenv("ZARINPAL_MERCHANT_ID", "").strip()
         self.sandbox = os.getenv("ZARINPAL_SANDBOX", "0") == "1"
+        self.session: aiohttp.ClientSession | None = None
+
+    async def start(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=20),
+                connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300),
+            )
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+        self.session = None
 
     @property
     def api_base(self):
@@ -22,12 +35,14 @@ class Zarinpal:
         return f"https://{host}/pg/StartPay/"
 
     async def _post(self, path: str, payload: dict) -> dict:
-        timeout = aiohttp.ClientTimeout(total=20)
+        if self.session is None or self.session.closed:
+            await self.start()
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(f"{self.api_base}/{path}", json=payload) as response:
-                    result = await response.json(content_type=None)
-                    return result if isinstance(result, dict) else {}
+            async with self.session.post(
+                f"{self.api_base}/{path}", json=payload
+            ) as response:
+                result = await response.json(content_type=None)
+                return result if isinstance(result, dict) else {}
         except (aiohttp.ClientError, TimeoutError, ValueError):
             return {"_transport_error": True}
 

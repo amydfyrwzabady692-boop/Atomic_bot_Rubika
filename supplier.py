@@ -58,26 +58,39 @@ class G2Bulk:
     def __init__(self):
         self.key = os.getenv("G2BULK_API_KEY", "").strip()
         self.game = os.getenv("G2BULK_GAME_CODE", "freefire_me").strip()
+        self.session: aiohttp.ClientSession | None = None
+
+    async def start(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+            )
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+        self.session = None
 
     async def _call(self, method, path, body=None, idem=None):
         headers = {"Accept": "application/json", "X-API-Key": self.key}
         if idem:
             headers["X-Idempotency-Key"] = idem
-        timeout = aiohttp.ClientTimeout(total=30)
+        if self.session is None or self.session.closed:
+            await self.start()
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.request(
-                    method, self.base + path, json=body, headers=headers
-                ) as response:
-                    data = await response.json(content_type=None)
-                    if not isinstance(data, dict):
-                        data = {"success": False, "message": str(data)}
-                    if (
-                        method.upper() != "GET"
-                        and (response.status in {408, 429} or response.status >= 500)
-                    ):
-                        data["_transport_uncertain"] = True
-                    return data
+            async with self.session.request(
+                method, self.base + path, json=body, headers=headers
+            ) as response:
+                data = await response.json(content_type=None)
+                if not isinstance(data, dict):
+                    data = {"success": False, "message": str(data)}
+                if (
+                    method.upper() != "GET"
+                    and (response.status in {408, 429} or response.status >= 500)
+                ):
+                    data["_transport_uncertain"] = True
+                return data
         except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
             return {
                 "success": False,
