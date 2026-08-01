@@ -455,6 +455,69 @@ class Database:
             payment_id,
         )
 
+    async def active_order_gateway(self, user_id: int, order_id: int):
+        return await self.pool.fetchrow(
+            """SELECT p.* FROM payments p
+               JOIN orders o ON o.id=p.order_id
+               WHERE p.order_id=$1 AND o.user_id=$2
+                 AND o.status='pending' AND o.inventory_reserved
+                 AND p.provider='gateway' AND p.authority IS NOT NULL
+                 AND p.status IN ('pending','cancelled','expired')
+               ORDER BY p.id DESC LIMIT 1""",
+            order_id,
+            user_id,
+        )
+
+    async def detach_order_gateway_to_wallet(self, user_id: int, order_id: int):
+        """Detach an issued link without losing a possible late payment.
+
+        A later successful callback credits the user's wallet, so changing the
+        order's payment method can never trigger a second product delivery.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="serializable"):
+                order = await conn.fetchrow(
+                    """SELECT id,status,inventory_reserved FROM orders
+                       WHERE id=$1 AND user_id=$2 FOR UPDATE""",
+                    order_id,
+                    user_id,
+                )
+                if (
+                    not order
+                    or order["status"] != "pending"
+                    or not order["inventory_reserved"]
+                ):
+                    raise ValueError("سفارش قابل تغییر نیست.")
+                pending_receipt = await conn.fetchval(
+                    """SELECT 1 FROM payments p
+                       JOIN receipts r ON r.payment_id=p.id
+                       WHERE p.order_id=$1 AND r.status='pending' LIMIT 1""",
+                    order_id,
+                )
+                if pending_receipt:
+                    raise ValueError("رسید این سفارش در انتظار بررسی است و روش پرداخت قابل تغییر نیست.")
+                payment = await conn.fetchrow(
+                    """SELECT * FROM payments
+                       WHERE order_id=$1 AND provider='gateway'
+                         AND authority IS NOT NULL
+                         AND status IN ('pending','cancelled','expired')
+                       ORDER BY id DESC LIMIT 1 FOR UPDATE""",
+                    order_id,
+                )
+                if not payment:
+                    raise ValueError("لینک درگاه فعالی برای تغییر پیدا نشد.")
+                await conn.execute(
+                    """UPDATE payments SET purpose='wallet',order_id=NULL
+                       WHERE id=$1 AND order_id=$2""",
+                    payment["id"],
+                    order_id,
+                )
+                await conn.execute(
+                    "UPDATE orders SET payment_method='pending' WHERE id=$1",
+                    order_id,
+                )
+                return payment
+
     async def payment_by_authority(self, authority: str):
         return await self.pool.fetchrow("SELECT * FROM payments WHERE authority=$1", authority)
 

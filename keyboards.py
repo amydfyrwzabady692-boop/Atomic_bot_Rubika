@@ -5,12 +5,9 @@ def button(button_id: str, text: str) -> dict:
 def link_button(button_id: str, text: str, url: str) -> dict:
     if not url.startswith(("https://", "http://")):
         raise ValueError("Link button URL must be absolute")
-    return {
-        "id": button_id,
-        "type": "Link",
-        "button_text": text,
-        "button_link": {"type": "url", "link_url": url},
-    }
+    # Rubika's Bot API expects the URL itself in ``id`` for Link buttons.
+    # ``button_link`` is a Telegram-style shape and makes send_message fail.
+    return {"id": url, "type": "Link", "button_text": text}
 
 
 def _build_button(item: tuple[str, str] | dict) -> dict:

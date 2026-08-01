@@ -250,13 +250,8 @@ class KeyboardTests(unittest.TestCase):
             "https://payment.example/authority",
         )
         self.assertEqual(value["type"], "Link")
-        self.assertEqual(
-            value["button_link"],
-            {
-                "type": "url",
-                "link_url": "https://payment.example/authority",
-            },
-        )
+        self.assertEqual(value["id"], "https://payment.example/authority")
+        self.assertNotIn("button_link", value)
         with self.assertRaises(ValueError):
             link_button("bad", "bad", "javascript:alert(1)")
 

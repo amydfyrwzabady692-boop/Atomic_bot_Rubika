@@ -190,6 +190,36 @@ class Router:
                 return
             await self.pay_order(event, user, int(match.group(2)), match.group(1))
             return
+        if action.startswith("pay_reopen:"):
+            order_arg = action.removeprefix("pay_reopen:")
+            if not order_arg.isdigit():
+                await self.send(event["chat_id"], "❌ شناسه سفارش نامعتبر است.")
+                return
+            payment = await self.db.active_order_gateway(user["id"], int(order_arg))
+            if not payment:
+                await self.send(event["chat_id"], "لینک پرداخت فعالی برای این سفارش پیدا نشد.")
+                return
+            await self.send_gateway_link(event, payment, int(order_arg), existing=True)
+            return
+        if action.startswith("pay_change:"):
+            order_arg = action.removeprefix("pay_change:")
+            if not order_arg.isdigit():
+                await self.send(event["chat_id"], "❌ شناسه سفارش نامعتبر است.")
+                return
+            order_id = int(order_arg)
+            try:
+                await self.db.detach_order_gateway_to_wallet(user["id"], order_id)
+            except ValueError as exc:
+                await self.send(event["chat_id"], f"❌ {exc}")
+                return
+            await self.send(
+                event["chat_id"],
+                "✅ روش پرداخت قابل تغییر شد. لینک قبلی را دیگر استفاده نکن؛ "
+                "اگر بعداً از همان لینک پرداخت شود، مبلغ فقط به کیف پولت اضافه می‌شود "
+                "و سفارش دوباره تحویل نمی‌شود.\n\nروش جدید را انتخاب کن:",
+                buttons=self.payment_method_buttons(order_id),
+            )
+            return
         if action.startswith("pay_cancel:"):
             order_arg = action.removeprefix("pay_cancel:")
             if not order_arg.isdigit():
@@ -487,10 +517,17 @@ class Router:
         if not product:
             await self.send(event["chat_id"], "این محصول دیگر موجود نیست.")
             return
-        if product["kind"] == "gem":
+        kind = str(product["kind"] or "")
+        title = str(product["title"] or "محصول")
+        price = int(product["price"] or 0)
+        if price <= 0:
+            await self.send(event["chat_id"], "قیمت این محصول معتبر نیست؛ با پشتیبانی تماس بگیر.")
+            return
+        if kind == "gem":
             supplier_sku = str(product["supplier_sku"] or "").strip()
             if supplier_sku.isdigit():
-                product_line = f"تعداد جم: {product['amount']:,}"
+                amount = int(product["amount"] or supplier_sku)
+                product_line = f"تعداد جم: {amount:,}"
             elif supplier_sku.startswith("Level Up Package"):
                 product_line = "🎯 نوع بسته: ارتقای سطح"
             elif supplier_sku == "Weekly Membership":
@@ -503,9 +540,9 @@ class Router:
                 product_line = "📦 محصول ویژه فری‌فایر"
             await self.send(
                 event["chat_id"],
-                f"🎮 {product['title']}\n"
+                f"🎮 {title}\n"
                 f"{product_line}\n"
-                f"💰 قیمت: {product['price']:,} تومان\n\n"
+                f"💰 قیمت: {price:,} تومان\n\n"
                 "برای ادامه خرید، بسته را تأیید کن.",
                 buttons=inline(
                     [
@@ -549,15 +586,46 @@ class Router:
             f"🧾 سفارش #{order['id']}\n{product['title']}\n"
             f"مبلغ: {order['payable_amount']:,} تومان\n"
             f"موجودی کیف پول: {balance:,} تومان\nروش پرداخت:",
-            buttons=inline(
-                [
-                    [(f"pay:gateway:{order['id']}", "🌐 درگاه زرین‌پال")],
-                    [(f"pay:card:{order['id']}", "💳 کارت‌به‌کارت")],
-                    [(f"pay:wallet:{order['id']}", "💰 کیف پول")],
-                    [(f"pay_cancel:{order['id']}", "✖️ لغو سفارش")],
-                ]
-            ),
+            buttons=self.payment_method_buttons(order["id"]),
         )
+
+    @staticmethod
+    def payment_method_buttons(order_id):
+        return inline(
+            [
+                [(f"pay:gateway:{order_id}", "🌐 درگاه زرین‌پال")],
+                [(f"pay:card:{order_id}", "💳 کارت‌به‌کارت")],
+                [(f"pay:wallet:{order_id}", "💰 کیف پول")],
+                [(f"pay_cancel:{order_id}", "✖️ لغو سفارش")],
+            ]
+        )
+
+    async def send_gateway_link(
+        self, event, payment, order_id=None, *, existing=False, url=None
+    ):
+        url = url or (self.zarinpal.start_base + str(payment["authority"]))
+        label = "لینک پرداخت قبلی" if existing else "لینک پرداخت امن"
+        rows = [[link_button("unused", "🔗 باز کردن درگاه پرداخت", url)]]
+        if order_id is not None:
+            rows.append([(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")])
+        text = (
+            f"✅ {label}\n"
+            f"مبلغ: {int(payment['amount']):,} تومان\n\n"
+            "دکمه زیر را بزن یا لینک را کپی کن:\n"
+            f"{url}"
+        )
+        try:
+            await self.send(event["chat_id"], text, buttons=inline(rows))
+        except RubikaAPIError:
+            log.exception("Rubika rejected gateway Link keypad; sending plain URL")
+            fallback = []
+            if order_id is not None:
+                fallback = [[(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")]]
+            await self.send(
+                event["chat_id"],
+                text,
+                buttons=inline(fallback) if fallback else None,
+            )
 
     async def pay_order(self, event, user, order_id, method):
         if await self.db.setting("payments_enabled", "1") != "1":
@@ -575,6 +643,23 @@ class Router:
             await self.send(event["chat_id"], "این سفارش قابل پرداخت نیست.")
             return
         await self.db.set_session(event["sender_id"])
+        existing_gateway = await self.db.active_order_gateway(user["id"], order_id)
+        if existing_gateway:
+            if method == "gateway":
+                await self.send_gateway_link(event, existing_gateway, order_id, existing=True)
+            else:
+                await self.send(
+                    event["chat_id"],
+                    "برای این سفارش یک لینک درگاه صادر شده است. می‌توانی همان لینک را "
+                    "باز کنی یا با دکمه زیر روش پرداخت را به‌صورت امن تغییر بدهی.",
+                    buttons=inline(
+                        [
+                            [(f"pay_reopen:{order_id}", "🔗 نمایش لینک قبلی")],
+                            [(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")],
+                        ]
+                    ),
+                )
+            return
         if method == "wallet":
             try:
                 result = await self.db.wallet_pay(user["id"], order_id)
@@ -646,23 +731,9 @@ class Router:
                 await self.send(event["chat_id"], f"❌ {error}")
                 return
             await self.db.attach_authority(payment["id"], authority)
-            await self.send(
-                event["chat_id"],
-                "✅ لینک پرداخت امن ساخته شد.\n"
-                f"مبلغ: {payment['amount']:,} تومان\n\n"
-                "برای ورود مستقیم به زرین‌پال، دکمه زیر را بزن:",
-                buttons=inline(
-                    [
-                        [
-                            link_button(
-                                f"gateway:{payment['id']}",
-                                "🔗 باز کردن درگاه پرداخت",
-                                url,
-                            )
-                        ]
-                    ]
-                ),
-            )
+            payment = dict(payment)
+            payment["authority"] = authority
+            await self.send_gateway_link(event, payment, order_id, url=url)
             return
         await self.db.set_session(event["sender_id"], "card_receipt", {"payment_id": payment["id"]})
         await self.send(
@@ -748,23 +819,9 @@ class Router:
                 await self.send(event["chat_id"], f"❌ {error}")
                 return
             await self.db.attach_authority(payment["id"], authority)
-            await self.send(
-                event["chat_id"],
-                "✅ لینک شارژ امن ساخته شد.\n"
-                f"مبلغ: {payment['amount']:,} تومان\n\n"
-                "برای ورود مستقیم به زرین‌پال، دکمه زیر را بزن:",
-                buttons=inline(
-                    [
-                        [
-                            link_button(
-                                f"wallet_gateway:{payment['id']}",
-                                "🔗 باز کردن درگاه پرداخت",
-                                url,
-                            )
-                        ]
-                    ]
-                ),
-            )
+            payment = dict(payment)
+            payment["authority"] = authority
+            await self.send_gateway_link(event, payment, url=url)
             return
         if await self.db.setting("card_enabled", "1") != "1":
             await self.send(event["chat_id"], "کارت‌به‌کارت فعلاً غیرفعال است.")

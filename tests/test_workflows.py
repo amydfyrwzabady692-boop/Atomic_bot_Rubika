@@ -108,6 +108,9 @@ class PaymentDatabase:
     async def set_session(self, rubika_id, state="", data=None):
         self.sessions.append((rubika_id, state, data))
 
+    async def active_order_gateway(self, _user_id, _order_id):
+        return None
+
     async def create_payment(self, *_args):
         return {"id": 31, "amount": 200_000, "provider": self.method}
 
@@ -147,6 +150,26 @@ class ProductDatabase:
             }
             for i, sku in enumerate(skus, start=1)
         ]
+
+
+class NullableAmountProductPool:
+    async def fetchrow(self, *_args):
+        return {
+            "id": 7,
+            "kind": "gem",
+            "title": "💎 110 جم",
+            "price": 191_000,
+            "amount": None,
+            "supplier_sku": "110",
+        }
+
+
+class NullableAmountProductDatabase:
+    def __init__(self):
+        self.pool = NullableAmountProductPool()
+
+    async def setting(self, _key, default=""):
+        return default
 
 
 class AsyncContext:
@@ -300,6 +323,16 @@ class WorkflowTests(unittest.TestCase):
             second_ids[:6],
             [f"product:{i}:2" for i in range(1, 7)],
         )
+
+    def test_product_click_handles_legacy_null_amount(self):
+        router, api = self.make_router(NullableAmountProductDatabase())
+        asyncio.run(
+            router.product_selected(
+                {"chat_id": "user-chat"}, {"id": 3}, 7, page=1
+            )
+        )
+        self.assertIn("تعداد جم: 110", api.messages[-1][1])
+        self.assertIn("191,000 تومان", api.messages[-1][1])
 
     def test_fulfillment_worker_never_auto_retries_ambiguous_submission(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -477,10 +510,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("VPN", message[1])
         button = message[2]["inline_keypad"]["rows"][0]["buttons"][0]
         self.assertEqual(button["type"], "Link")
-        self.assertEqual(
-            button["button_link"]["link_url"],
-            "https://payment.example/A0001",
-        )
+        self.assertEqual(button["id"], "https://payment.example/A0001")
+        self.assertIn("https://payment.example/A0001", message[1])
 
     def test_card_number_is_sent_as_an_exact_standalone_copy_message(self):
         router, api = self.make_router(PaymentDatabase("card"))
