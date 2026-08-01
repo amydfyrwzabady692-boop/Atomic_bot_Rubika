@@ -82,9 +82,41 @@ class Database:
 
     async def products(self, kind: str):
         return await self.pool.fetch(
-            "SELECT * FROM products WHERE kind=$1 AND active AND stock>0 ORDER BY price,id",
+            "SELECT * FROM products WHERE kind=$1 AND active AND stock>0 "
+            "ORDER BY sort_order,id",
             kind,
         )
+
+    async def move_catalogue_item(self, table: str, item_id: int, direction: str):
+        """Move a product/category deterministically and compact its sort ranks."""
+        if table not in {"products", "categories"}:
+            raise ValueError("جدول مرتب‌سازی نامعتبر است.")
+        direction = str(direction or "").strip().lower()
+        if direction not in {"up", "down", "first", "last"}:
+            raise ValueError("جهت باید up، down، first یا last باشد.")
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="serializable"):
+                rows = await conn.fetch(
+                    f"SELECT id FROM {table} ORDER BY sort_order,id FOR UPDATE"
+                )
+                identifiers = [int(row["id"]) for row in rows]
+                item_id = int(item_id)
+                if item_id not in identifiers:
+                    raise ValueError("آیتم برای مرتب‌سازی پیدا نشد.")
+                old_index = identifiers.index(item_id)
+                new_index = {
+                    "up": max(0, old_index - 1),
+                    "down": min(len(identifiers) - 1, old_index + 1),
+                    "first": 0,
+                    "last": len(identifiers) - 1,
+                }[direction]
+                identifiers.pop(old_index)
+                identifiers.insert(new_index, item_id)
+                await conn.executemany(
+                    f"UPDATE {table} SET sort_order=$1 WHERE id=$2",
+                    [(rank * 10, identifier) for rank, identifier in enumerate(identifiers, 1)],
+                )
+                return old_index != new_index
 
     async def create_order(self, user_id: int, product_id: int, player_id=""):
         async with self.pool.acquire() as conn:
@@ -318,6 +350,35 @@ class Database:
                         or order["payable_amount"] <= 0
                     ):
                         raise ValueError("سفارش قابل پرداخت نیست.")
+                    protected_payment = await conn.fetchrow(
+                        """SELECT p.provider,p.authority,
+                                  EXISTS(
+                                    SELECT 1 FROM receipts r
+                                    WHERE r.payment_id=p.id AND r.status='pending'
+                                  ) receipt_pending
+                           FROM payments p
+                           WHERE p.order_id=$1
+                             AND (
+                               (p.provider='gateway' AND p.authority IS NOT NULL
+                                AND p.status IN ('pending','cancelled','expired'))
+                               OR EXISTS(
+                                 SELECT 1 FROM receipts r
+                                 WHERE r.payment_id=p.id AND r.status='pending'
+                               )
+                             )
+                           ORDER BY p.id DESC LIMIT 1 FOR UPDATE OF p""",
+                        order_id,
+                    )
+                    if protected_payment:
+                        if protected_payment["receipt_pending"]:
+                            raise ValueError(
+                                "رسید این سفارش در انتظار بررسی است؛ "
+                                "تا اعلام نتیجه روش پرداخت را عوض نکن."
+                            )
+                        raise ValueError(
+                            "برای این سفارش قبلاً لینک درگاه صادر شده است؛ "
+                            "همان لینک را بررسی کن."
+                        )
                     amount = int(order["payable_amount"])
                     await conn.execute(
                         """UPDATE receipts SET status='rejected',reviewed_at=now()
@@ -331,6 +392,45 @@ class Database:
                         """UPDATE payments SET status='cancelled'
                            WHERE order_id=$1 AND status='pending'""",
                         order_id,
+                    )
+                else:
+                    await conn.fetchval(
+                        "SELECT id FROM users WHERE id=$1 FOR UPDATE",
+                        user_id,
+                    )
+                    protected_wallet_payment = await conn.fetchrow(
+                        """SELECT p.provider,p.authority,
+                                  EXISTS(
+                                    SELECT 1 FROM receipts r
+                                    WHERE r.payment_id=p.id AND r.status='pending'
+                                  ) receipt_pending
+                           FROM payments p
+                           WHERE p.user_id=$1 AND p.purpose='wallet'
+                             AND (
+                               (p.provider='gateway' AND p.authority IS NOT NULL
+                                AND p.status='pending' AND p.expires_at>now())
+                               OR EXISTS(
+                                 SELECT 1 FROM receipts r
+                                 WHERE r.payment_id=p.id AND r.status='pending'
+                               )
+                             )
+                           ORDER BY p.id DESC LIMIT 1 FOR UPDATE OF p""",
+                        user_id,
+                    )
+                    if protected_wallet_payment:
+                        raise ValueError(
+                            "یک شارژ کیف پول فعال یا رسید در انتظار داری؛ "
+                            "ابتدا نتیجه همان پرداخت مشخص شود."
+                        )
+                    await conn.execute(
+                        """UPDATE payments SET status='cancelled'
+                           WHERE user_id=$1 AND purpose='wallet'
+                             AND status='pending' AND authority IS NULL
+                             AND NOT EXISTS (
+                               SELECT 1 FROM receipts r
+                               WHERE r.payment_id=payments.id AND r.status='pending'
+                             )""",
+                        user_id,
                     )
                 return await conn.fetchrow(
                     """INSERT INTO payments(
@@ -361,30 +461,46 @@ class Database:
     async def finalize_gateway(self, authority: str, ref_id: str):
         async with self.pool.acquire() as conn:
             async with conn.transaction(isolation="serializable"):
+                # Read once without a lock so a terminal callback can be
+                # handled without touching its order.  Pending order payments
+                # always lock order -> payment, which is the same order used
+                # by create_payment, receipt review and cancellation.
                 payment = await conn.fetchrow(
                     "SELECT * FROM payments WHERE authority=$1",
                     authority,
                 )
                 if not payment:
                     raise ValueError("پرداخت پیدا نشد.")
-                if payment["purpose"] == "order":
-                    order_status = await conn.fetchval(
-                        "SELECT status FROM orders WHERE id=$1 FOR UPDATE",
-                        payment["order_id"],
-                    )
-                    if order_status != "pending":
-                        raise ValueError("سفارش قبلاً پرداخت یا بسته شده است.")
-                payment = await conn.fetchrow(
-                    "SELECT * FROM payments WHERE id=$1 FOR UPDATE",
-                    payment["id"],
-                )
                 if payment["status"] == "verified":
+                    payment = await conn.fetchrow(
+                        "SELECT * FROM payments WHERE id=$1 FOR UPDATE",
+                        payment["id"],
+                    )
+                    if payment["ref_id"] and str(payment["ref_id"]) != str(ref_id):
+                        raise ValueError("شناسه مرجع با پرداخت تأییدشده مطابقت ندارد.")
                     return payment, False
                 if (
                     payment["provider"] != "gateway"
                     or payment["status"] not in {"pending", "expired", "cancelled"}
                 ):
                     raise ValueError("پرداخت نامعتبر است.")
+                if payment["purpose"] == "order":
+                    order_status = await conn.fetchval(
+                        "SELECT status FROM orders WHERE id=$1 FOR UPDATE",
+                        payment["order_id"],
+                    )
+                payment = await conn.fetchrow(
+                    "SELECT * FROM payments WHERE id=$1 FOR UPDATE",
+                    payment["id"],
+                )
+                # Another callback may have completed while this transaction
+                # waited for the order/payment locks.  It is still a success.
+                if payment["status"] == "verified":
+                    if payment["ref_id"] and str(payment["ref_id"]) != str(ref_id):
+                        raise ValueError("شناسه مرجع با پرداخت تأییدشده مطابقت ندارد.")
+                    return payment, False
+                if payment["purpose"] == "order" and order_status != "pending":
+                    raise ValueError("سفارش قبلاً پرداخت یا بسته شده است.")
                 await conn.execute(
                     """UPDATE payments SET status='verified',ref_id=$1,verified_at=now()
                        WHERE id=$2""",
@@ -454,6 +570,23 @@ class Database:
                     raise ValueError("سفارش قابل پرداخت نیست.")
                 if order["wallet_paid"] > 0:
                     raise ValueError("سهم کیف پول قبلاً برای این سفارش اعمال شده است.")
+                protected_payment = await conn.fetchval(
+                    """SELECT 1 FROM payments p
+                       WHERE p.order_id=$1 AND (
+                         (p.provider='gateway' AND p.authority IS NOT NULL
+                          AND p.status IN ('pending','cancelled','expired'))
+                         OR EXISTS (
+                           SELECT 1 FROM receipts r
+                           WHERE r.payment_id=p.id AND r.status='pending'
+                         )
+                       ) LIMIT 1""",
+                    order_id,
+                )
+                if protected_payment:
+                    raise ValueError(
+                        "برای این سفارش پرداخت باز وجود دارد؛ "
+                        "تا مشخص شدن نتیجه، کیف پول اعمال نمی‌شود."
+                    )
                 amount = min(int(user["balance"]), int(order["payable_amount"]))
                 if amount <= 0:
                     raise ValueError("موجودی کیف پول صفر است.")
@@ -640,6 +773,12 @@ class Database:
                        JOIN users u ON u.id=o.user_id
                        WHERE o.status='pending'
                          AND o.created_at<now()-interval '1 hour'
+                         AND NOT EXISTS (
+                           SELECT 1 FROM payments p
+                           WHERE p.order_id=o.id AND p.provider='gateway'
+                             AND p.authority IS NOT NULL
+                             AND p.status IN ('pending','cancelled','expired')
+                         )
                          AND NOT EXISTS (
                            SELECT 1 FROM payments p
                            JOIN receipts r ON r.payment_id=p.id

@@ -279,7 +279,7 @@ class KeyboardTests(unittest.TestCase):
         self.assertIn("مدیریت مدیران فقط در اختیار مالک اصلی", source)
         self.assertIn('action.startswith("admin_")', handle_source)
         self.assertIn("if is_admin:", handle_source)
-        self.assertEqual(Router.pretty_card("6219 8619-9783 1192"), "6219861997831192")
+        self.assertEqual(Router.pretty_card("6037 9912-3456 7893"), "6037991234567893")
 
 
 class SchemaTests(unittest.TestCase):
@@ -298,6 +298,14 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("admin_notified_at", schema)
         self.assertIn("payments_enabled", schema)
         self.assertIn("telegram_catalog_20260726", schema)
+
+    def test_catalogue_order_and_order_history_are_durable(self):
+        schema = (ROOT / "schema.sql").read_text(encoding="utf-8")
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        self.assertIn("sort_order INTEGER NOT NULL", schema)
+        self.assertIn("order_status_history", schema)
+        self.assertIn("trg_order_status_transition", schema)
+        self.assertIn("ORDER BY sort_order,id", database_source)
         self.assertIn("g2bulk_catalogue_14_20260727", schema)
         self.assertIn(
             "('gem','🎯 لول‌آپ سطح 6',6,"

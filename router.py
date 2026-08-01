@@ -4,7 +4,13 @@ import re
 
 from database import Database
 from keyboards import admin_menu, inline, link_button, main_menu
-from payment_safety import MIN_WALLET_CHARGE, checked_amount, valid_card_number
+from payment_safety import (
+    MIN_WALLET_CHARGE,
+    checked_amount,
+    checked_decimal,
+    supplier_cost_toman,
+    valid_card_number,
+)
 from payments import Zarinpal
 from rubika_api import RubikaAPI, RubikaAPIError
 from supplier import G2Bulk, usd_toman_rate
@@ -1339,7 +1345,9 @@ class Router:
                 )
                 product_lines = []
                 for product in products:
-                    cost = round(float(product["supplier_cost_usd"]) * rate["rate"])
+                    cost = supplier_cost_toman(
+                        product["supplier_cost_usd"], rate["rate"]
+                    )
                     product_lines.append(
                         f"#{product['id']} {product['title']}: "
                         f"هزینه {cost:,} | فروش {product['price']:,} | "
@@ -1362,7 +1370,7 @@ class Router:
         elif action == "admin_products":
             rows = await self.db.pool.fetch(
                 """SELECT id,kind,title,price,stock,active
-                   FROM products ORDER BY kind,id LIMIT 100"""
+                   FROM products ORDER BY kind,sort_order,id LIMIT 100"""
             )
             lines = [
                 f"#{row['id']} | {row['kind']} | {row['title']} | "
@@ -1378,7 +1386,7 @@ class Router:
             )
         elif action == "admin_categories":
             rows = await self.db.pool.fetch(
-                "SELECT id,title,active FROM categories ORDER BY id"
+                "SELECT id,title,active FROM categories ORDER BY sort_order,id"
             )
             await self.send(
                 chat,
@@ -1687,8 +1695,8 @@ class Router:
 
     def admin_help(self, section):
         docs = {
-            "admin_products": "/product_add kind|title|price|stock|amount|sku|cost_usd\n/product_edit id|field|value\nفیلدهای قابل ویرایش شامل category_id هم هستند.\n/product_delete id",
-            "admin_categories": "/category_add title\n/category_delete id",
+            "admin_products": "/product_add kind|title|price|stock|amount|sku|cost_usd\n/product_edit id|field|value\n/product_move id|up|down|first|last\nفیلدهای قابل ویرایش شامل category_id و sort_order هم هستند.\n/product_delete id",
+            "admin_categories": "/category_add title\n/category_move id|up|down|first|last\n/category_delete id",
             "admin_finance": "/setting payments_enabled 1|0\n/setting zarinpal_enabled 1|0\n/setting card_enabled 1|0\n/setting card_number NUMBER\n/setting card_holder NAME\n/setting card_bank BANK\n/setting usd_toman_rate NUMBER",
             "admin_search": "/user شناسه\n/order شماره",
             "admin_broadcast": "/broadcast متن پیام",
@@ -1817,14 +1825,22 @@ class Router:
                 if safe_stock < 0:
                     raise ValueError("موجودی محصول منفی نمی‌تواند باشد.")
                 safe_amount = int(amount) if amount.strip() else None
-                safe_cost = float(cost) if cost.strip() else None
+                safe_cost = (
+                    checked_decimal(cost, label="هزینه دلاری")
+                    if cost.strip() else None
+                )
                 if safe_amount is not None and safe_amount <= 0:
                     raise ValueError("تعداد محصول باید مثبت باشد.")
                 if safe_cost is not None and safe_cost <= 0:
                     raise ValueError("هزینه دلاری باید مثبت باشد.")
                 await self.db.pool.execute(
-                    """INSERT INTO products(kind,title,price,stock,amount,supplier_sku,supplier_cost_usd)
-                       VALUES($1,$2,$3,$4,$5,$6,$7)""",
+                    """INSERT INTO products(
+                         kind,title,price,stock,amount,supplier_sku,
+                         supplier_cost_usd,sort_order
+                       ) VALUES(
+                         $1,$2,$3,$4,$5,$6,$7,
+                         (SELECT COALESCE(MAX(sort_order),0)+10 FROM products)
+                       )""",
                     kind,
                     title.strip(),
                     safe_price,
@@ -1850,19 +1866,18 @@ class Router:
                     "supplier_cost_usd",
                     "amount",
                     "category_id",
+                    "sort_order",
                 }
                 if field not in allowed:
                     raise ValueError("فیلد غیرمجاز است.")
                 if field == "price":
                     value = checked_amount(value, label="قیمت محصول")
-                elif field in {"stock", "amount", "category_id"}:
+                elif field in {"stock", "amount", "category_id", "sort_order"}:
                     value = int(value)
-                    if field == "stock" and value < 0:
-                        raise ValueError("موجودی محصول منفی نمی‌تواند باشد.")
+                    if field in {"stock", "sort_order"} and value < 0:
+                        raise ValueError("موجودی یا ترتیب نمایش نمی‌تواند منفی باشد.")
                 elif field == "supplier_cost_usd":
-                    value = float(value)
-                    if value <= 0:
-                        raise ValueError("هزینه دلاری باید مثبت باشد.")
+                    value = checked_decimal(value, label="هزینه دلاری")
                 elif field == "active":
                     value = value.strip().lower() in {"1", "true", "yes", "on"}
                 await self.db.pool.execute(
@@ -1874,11 +1889,15 @@ class Router:
                 await self.db.pool.execute(
                     "UPDATE products SET active=false WHERE id=$1", int(args)
                 )
+            elif name == "/product_move":
+                item_id, direction = args.split("|", 1)
+                await self.db.move_catalogue_item("products", int(item_id), direction)
             elif name == "/category_add":
                 if not args.strip():
                     raise ValueError("عنوان دسته‌بندی خالی است.")
                 await self.db.pool.execute(
-                    """INSERT INTO categories(title) VALUES($1)
+                    """INSERT INTO categories(title,sort_order)
+                       VALUES($1,(SELECT COALESCE(MAX(sort_order),0)+10 FROM categories))
                        ON CONFLICT(title) DO UPDATE SET active=true""",
                     args.strip(),
                 )
@@ -1886,6 +1905,9 @@ class Router:
                 await self.db.pool.execute(
                     "UPDATE categories SET active=false WHERE id=$1", int(args)
                 )
+            elif name == "/category_move":
+                item_id, direction = args.split("|", 1)
+                await self.db.move_catalogue_item("categories", int(item_id), direction)
             elif name == "/code_add":
                 kind, code, value, max_uses = args.split("|", 3)
                 kind = kind.strip()
@@ -2134,6 +2156,21 @@ class Router:
                         or not order["inventory_reserved"]
                     ):
                         raise ValueError("سفارش قبلاً پرداخت یا بسته شده است.")
+                    if receipt["purpose"] == "order":
+                        issued_gateway = await conn.fetchval(
+                            """SELECT 1 FROM payments
+                               WHERE order_id=$1 AND id<>$2
+                                 AND provider='gateway' AND authority IS NOT NULL
+                                 AND status IN ('pending','cancelled','expired')
+                               LIMIT 1""",
+                            receipt["order_id"],
+                            receipt["payment_id"],
+                        )
+                        if issued_gateway:
+                            raise ValueError(
+                                "برای این سفارش لینک درگاه هم صادر شده است؛ "
+                                "ابتدا وضعیت درگاه باید تطبیق شود."
+                            )
                     await conn.execute(
                         "UPDATE payments SET status='verified',verified_at=now() WHERE id=$1",
                         receipt["payment_id"],

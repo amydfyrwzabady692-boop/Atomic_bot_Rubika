@@ -8,6 +8,7 @@ from aiohttp import web
 from config import Settings
 from database import Database
 from keyboards import inline
+from payment_safety import checked_decimal, supplier_cost_toman
 from payments import Zarinpal
 from router import Router
 from rubika_api import RubikaAPI, normalize_event
@@ -442,7 +443,12 @@ class Application:
                     )
                     cost_usd = result.get("cost_usd") or row["supplier_cost_usd"]
                     if rate.get("ok") and cost_usd:
-                        cost_toman = round(float(cost_usd) * rate["rate"])
+                        safe_cost_usd = checked_decimal(
+                            cost_usd, label="هزینه دلاری تأمین‌کننده"
+                        )
+                        cost_toman = supplier_cost_toman(
+                            safe_cost_usd, rate["rate"]
+                        )
                         await self.db.pool.execute(
                             """INSERT INTO profit_snapshots(
                                  order_id,sale_toman,supplier_cost_usd,usd_toman_rate,
@@ -451,7 +457,7 @@ class Application:
                                ON CONFLICT(order_id) DO NOTHING""",
                             row["id"],
                             row["sale_toman"],
-                            float(cost_usd),
+                            safe_cost_usd,
                             rate["rate"],
                             cost_toman,
                             row["sale_toman"] - cost_toman,
@@ -546,7 +552,7 @@ class Application:
 
     async def reconcile_gateway_payments(self):
         rows = await self.db.pool.fetch(
-            """SELECT id,authority,amount FROM payments
+            """SELECT id,authority,amount,verify_attempts FROM payments
                WHERE provider='gateway' AND authority IS NOT NULL
                  AND status IN ('pending','expired','cancelled')
                  AND expires_at<now()
@@ -568,6 +574,14 @@ class Application:
                 row["amount"],
                 row["authority"],
             )
+            if verify_status == "not_paid":
+                if int(row["verify_attempts"] or 0) + 1 >= 3:
+                    await self.db.pool.execute(
+                        """UPDATE payments SET status='rejected'
+                           WHERE id=$1 AND status IN ('pending','expired','cancelled')""",
+                        row["id"],
+                    )
+                continue
             if verify_status != "verified":
                 continue
             try:

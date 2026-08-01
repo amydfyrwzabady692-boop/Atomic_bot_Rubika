@@ -26,8 +26,11 @@ CREATE TABLE IF NOT EXISTS categories (
   id BIGSERIAL PRIMARY KEY,
   title TEXT UNIQUE NOT NULL,
   active BOOLEAN NOT NULL DEFAULT true,
+  sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE categories
+  ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS products (
   id BIGSERIAL PRIMARY KEY,
   category_id BIGINT REFERENCES categories(id) ON DELETE SET NULL,
@@ -40,8 +43,16 @@ CREATE TABLE IF NOT EXISTS products (
   price BIGINT NOT NULL CHECK (price > 0),
   stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
   active BOOLEAN NOT NULL DEFAULT true,
+  sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_products_catalogue_order
+  ON products(kind,active,sort_order,id);
+CREATE INDEX IF NOT EXISTS idx_categories_catalogue_order
+  ON categories(active,sort_order,id);
+
 CREATE TABLE IF NOT EXISTS promo_codes (
   id BIGSERIAL PRIMARY KEY,
   code TEXT UNIQUE NOT NULL,
@@ -83,6 +94,30 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 ALTER TABLE orders
   ADD COLUMN IF NOT EXISTS inventory_reserved BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS order_status_history (
+  id BIGSERIAL PRIMARY KEY,
+  order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  old_status TEXT,
+  new_status TEXT NOT NULL,
+  changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE OR REPLACE FUNCTION record_order_status_transition()
+RETURNS trigger AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    INSERT INTO order_status_history(order_id,old_status,new_status)
+    VALUES(NEW.id,NULL,NEW.status);
+  ELSIF OLD.status IS DISTINCT FROM NEW.status THEN
+    INSERT INTO order_status_history(order_id,old_status,new_status)
+    VALUES(NEW.id,OLD.status,NEW.status);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_order_status_transition ON orders;
+CREATE TRIGGER trg_order_status_transition
+AFTER INSERT OR UPDATE OF status ON orders
+FOR EACH ROW EXECUTE FUNCTION record_order_status_transition();
 CREATE TABLE IF NOT EXISTS order_items (
   id BIGSERIAL PRIMARY KEY,
   order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,

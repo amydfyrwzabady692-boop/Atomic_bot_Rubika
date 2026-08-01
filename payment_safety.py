@@ -1,4 +1,5 @@
 import os
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 MIN_GATEWAY_AMOUNT = 1_000
 MIN_WALLET_CHARGE = 10_000
@@ -15,6 +16,32 @@ def checked_amount(value, *, minimum=1, maximum=MAX_PAYMENT_AMOUNT, label="مب�
     if amount < minimum or amount > maximum:
         raise ValueError(f"{label} خارج از محدوده مجاز است.")
     return amount
+
+
+def checked_decimal(value, *, minimum=Decimal("0.000001"),
+                    maximum=Decimal("1000000"), scale=6,
+                    label="مقدار اعشاری"):
+    """Parse a finite bounded decimal without introducing binary-float error."""
+    if isinstance(value, bool):
+        raise ValueError(f"{label} نامعتبر است.")
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"{label} باید عدد معتبر باشد.") from None
+    if not number.is_finite() or number < minimum or number > maximum:
+        raise ValueError(f"{label} خارج از محدوده مجاز است.")
+    quantum = Decimal(1).scaleb(-int(scale))
+    return number.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def supplier_cost_toman(cost_usd, usd_toman_rate_value):
+    cost = checked_decimal(cost_usd, label="هزینه دلاری")
+    rate = checked_amount(
+        usd_toman_rate_value,
+        maximum=10_000_000,
+        label="نرخ دلار",
+    )
+    return int((cost * Decimal(rate)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def order_amounts(total, discount=0, wallet_paid=0):

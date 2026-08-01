@@ -10,6 +10,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT))
 
 from database import Database
+from payment_safety import checked_decimal, supplier_cost_toman
 from router import Router
 
 
@@ -182,6 +183,8 @@ class WalletConnection:
         raise AssertionError(query)
 
     async def fetchval(self, query, *_args):
+        if "SELECT 1 FROM payments" in query:
+            return None
         if "count(*)+1" in query:
             return 1
         raise AssertionError(query)
@@ -192,6 +195,35 @@ class WalletConnection:
 
 
 class WalletPool:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def acquire(self):
+        return AsyncContext(self.connection)
+
+
+class VerifiedGatewayConnection:
+    def __init__(self):
+        self.queries = []
+
+    def transaction(self, **_kwargs):
+        return AsyncContext(self)
+
+    async def fetchrow(self, query, *_args):
+        self.queries.append(query)
+        if "FROM payments" in query:
+            return {
+                "id": 41,
+                "status": "verified",
+                "ref_id": "REF-1",
+                "provider": "gateway",
+                "purpose": "order",
+                "order_id": 12,
+            }
+        raise AssertionError(query)
+
+
+class VerifiedGatewayPool:
     def __init__(self, connection):
         self.connection = connection
 
@@ -308,6 +340,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("receipt_pending", source)
         self.assertIn("یک سفارش با لینک درگاه", source)
 
+    def test_payment_method_cannot_change_while_money_is_in_flight(self):
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        router_source = (ROOT / "router.py").read_text(encoding="utf-8")
+        worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn("p.provider='gateway' AND p.authority IS NOT NULL", database_source)
+        self.assertIn("receipt_pending", database_source)
+        self.assertIn("لینک درگاه هم صادر شده", router_source)
+        self.assertIn('verify_status == "not_paid"', worker_source)
+        self.assertIn("verify_attempts", worker_source)
+
     def test_pending_receipt_is_not_expired_before_admin_review(self):
         database_source = (ROOT / "database.py").read_text(encoding="utf-8")
         worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -363,6 +405,32 @@ class WorkflowTests(unittest.TestCase):
                 for query, _args in connection.executed
             )
         )
+
+    def test_repeated_gateway_callback_is_idempotent_before_order_check(self):
+        connection = VerifiedGatewayConnection()
+        database = Database("postgresql://unused")
+        database.pool = VerifiedGatewayPool(connection)
+        payment, changed = asyncio.run(
+            database.finalize_gateway("AUTH-1", "REF-1")
+        )
+        self.assertFalse(changed)
+        self.assertEqual(payment["id"], 41)
+        self.assertEqual(len(connection.queries), 2)
+        self.assertNotIn("FOR UPDATE", connection.queries[0])
+        self.assertIn("FOR UPDATE", connection.queries[1])
+
+    def test_supplier_cost_math_uses_decimal_rounding(self):
+        self.assertEqual(str(checked_decimal("0.935")), "0.935000")
+        self.assertEqual(supplier_cost_toman("0.935", 100_001), 93_501)
+
+    def test_admin_supports_stable_product_and_category_reordering(self):
+        source = inspect.getsource(Router.admin_command)
+        move_source = inspect.getsource(Database.move_catalogue_item)
+        self.assertIn('/product_move', source)
+        self.assertIn('/category_move', source)
+        self.assertIn('"first"', move_source)
+        self.assertIn('"last"', move_source)
+        self.assertIn("executemany", move_source)
 
     def test_delegated_admin_cannot_manage_other_admins(self):
         database = AdminDatabase()
