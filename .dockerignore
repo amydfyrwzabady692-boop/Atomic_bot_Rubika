@@ -1,0 +1,13 @@
+.env
+.venv
+tests
+backups
+__pycache__
+*.pyc
+.git
+.idea
+.agents
+.codex
+.ruff_cache
+.pytest_cache
+*.log
