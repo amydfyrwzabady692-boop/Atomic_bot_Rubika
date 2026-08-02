@@ -281,6 +281,7 @@ INSERT INTO settings(key,value) VALUES
  ('sales_enabled','1'),
  ('payments_enabled','1'),
  ('zarinpal_enabled','1'),
+ ('zarinpal_merchant_id',''),
  ('card_enabled','1'),
  ('card_number',''),
  ('card_holder',''),

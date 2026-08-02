@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 from database import Database
 from keyboards import admin_menu, link_button, main_menu
 from payment_safety import checked_amount, order_amounts, valid_card_number
+from payments import Zarinpal
 from router import Router
 from rubika_api import normalize_event
 from supplier import G2Bulk, g2_idempotency_key
@@ -170,6 +171,20 @@ class FinancialTests(unittest.TestCase):
         self.assertTrue(valid_card_number("6037 9912 3456 7893"))
         self.assertFalse(valid_card_number("6037991234567890"))
         self.assertFalse(valid_card_number("1111111111111111"))
+
+    def test_zarinpal_merchant_prefers_db_setting_over_env(self):
+        async def getter(key, default):
+            self.assertEqual(key, "zarinpal_merchant_id")
+            return "db-merchant"
+
+        zp = Zarinpal(settings_getter=getter)
+        zp._env_merchant = "env-merchant"
+        self.assertEqual(asyncio.run(zp.merchant()), "db-merchant")
+
+    def test_zarinpal_merchant_falls_back_to_env(self):
+        zp = Zarinpal(settings_getter=None)
+        zp._env_merchant = "env-merchant"
+        self.assertEqual(asyncio.run(zp.merchant()), "env-merchant")
 
 
 class DatabaseTests(unittest.TestCase):

@@ -27,7 +27,7 @@ class Application:
         self.db = Database(config.database_url)
         self.api = RubikaAPI(config.token)
         self.router = Router(self.db, self.api, config)
-        self.zarinpal = Zarinpal()
+        self.zarinpal = Zarinpal(settings_getter=self.db.setting)
         self.g2 = G2Bulk()
         self.tasks: list[asyncio.Task] = []
         self._update_slots = asyncio.Semaphore(20)
@@ -623,9 +623,16 @@ async def webhook(request):
 
 async def payment_callback(request):
     core: Application = request.app["core"]
-    authority = (request.query.get("Authority") or request.query.get("authority") or "").strip()
+    query = dict(request.query)
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            query.update(body)
+    except (TypeError, ValueError):
+        pass
+    authority = (query.get("Authority") or query.get("authority") or "").strip()
     callback_status = (
-        (request.query.get("Status") or request.query.get("status") or "").strip().upper()
+        (query.get("Status") or query.get("status") or "").strip().upper()
     )
     title, message = "پرداخت ناموفق", "پرداخت انجام نشد."
     payment = await core.db.payment_by_authority(authority) if authority else None
@@ -692,6 +699,7 @@ def build_web_app(config=None):
     app.router.add_post("/rubika/update/{secret}", webhook)
     app.router.add_post("/rubika/inline/{secret}", webhook)
     app.router.add_get("/payment/callback", payment_callback)
+    app.router.add_post("/payment/callback", payment_callback)
     app.router.add_get("/health", health)
     app.router.add_get("/ready", ready)
     app.on_startup.append(lambda _: core.start())

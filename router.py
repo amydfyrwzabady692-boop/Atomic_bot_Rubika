@@ -50,7 +50,10 @@ WELCOME = """✨ به اتومیک شاپ روبیکا خوش اومدی! ✨
 class Router:
     def __init__(self, db: Database, api: RubikaAPI, config):
         self.db, self.api, self.config = db, api, config
-        self.zarinpal = Zarinpal()
+        settings_getter = getattr(db, "setting", None)
+        self.zarinpal = Zarinpal(
+            settings_getter=settings_getter if callable(settings_getter) else None
+        )
         self.g2 = G2Bulk()
 
     async def send(self, chat_id, text, *, menu=None, buttons=None):
@@ -1465,6 +1468,7 @@ class Router:
                 for key in (
                     "payments_enabled",
                     "zarinpal_enabled",
+                    "zarinpal_merchant_id",
                     "card_enabled",
                     "card_number",
                     "card_holder",
@@ -1480,6 +1484,14 @@ class Router:
             values["card_bank"] = values["card_bank"] or os.getenv(
                 "CARD_TRANSFER_BANK", ""
             ).strip()
+            merchant = values["zarinpal_merchant_id"] or os.getenv(
+                "ZARINPAL_MERCHANT_ID", ""
+            ).strip()
+            merchant_text = (
+                f"{merchant[:6]}…{merchant[-4:]}"
+                if len(merchant) > 12
+                else merchant or "تنظیم‌نشده"
+            )
             masked_card = (
                 f"**** **** **** {values['card_number'][-4:]}"
                 if len(values["card_number"]) >= 4
@@ -1490,6 +1502,7 @@ class Router:
                 "💳 تنظیمات مالی\n"
                 f"پرداخت‌ها: {'فعال' if values['payments_enabled']=='1' else 'غیرفعال'}\n"
                 f"زرین‌پال: {'فعال' if values['zarinpal_enabled']=='1' else 'غیرفعال'}\n"
+                f"مرچنت: {merchant_text}\n"
                 f"کارت‌به‌کارت: {'فعال' if values['card_enabled']=='1' else 'غیرفعال'}\n"
                 f"کارت: {masked_card}\n"
                 f"دارنده: {values['card_holder'] or '—'}\n"
@@ -1754,7 +1767,7 @@ class Router:
         docs = {
             "admin_products": "/product_add kind|title|price|stock|amount|sku|cost_usd\n/product_edit id|field|value\n/product_move id|up|down|first|last\nفیلدهای قابل ویرایش شامل category_id و sort_order هم هستند.\n/product_delete id",
             "admin_categories": "/category_add title\n/category_move id|up|down|first|last\n/category_delete id",
-            "admin_finance": "/setting payments_enabled 1|0\n/setting zarinpal_enabled 1|0\n/setting card_enabled 1|0\n/setting card_number NUMBER\n/setting card_holder NAME\n/setting card_bank BANK\n/setting usd_toman_rate NUMBER",
+            "admin_finance": "/setting payments_enabled 1|0\n/setting zarinpal_enabled 1|0\n/setting zarinpal_merchant_id UUID\n/setting card_enabled 1|0\n/setting card_number NUMBER\n/setting card_holder NAME\n/setting card_bank BANK\n/setting usd_toman_rate NUMBER",
             "admin_search": "/user شناسه\n/order شماره",
             "admin_broadcast": "/broadcast متن پیام",
             "admin_codes": "/code_add gift|CODE|VALUE|MAX\n/code_add discount|CODE|PERCENT|MAX\n/code_delete ID",
@@ -1810,6 +1823,7 @@ class Router:
                     "sales_enabled",
                     "payments_enabled",
                     "zarinpal_enabled",
+                    "zarinpal_merchant_id",
                     "card_enabled",
                     "card_number",
                     "card_holder",
@@ -1822,6 +1836,19 @@ class Router:
                     raise ValueError("مقدار این تنظیم فقط 0 یا 1 است.")
                 if key in {"welcome_text", "help_text", "support_prompt"} and not value.strip():
                     raise ValueError("متن تنظیم نمی‌تواند خالی باشد.")
+                if key == "zarinpal_merchant_id":
+                    merchant = value.strip()
+                    if not merchant:
+                        raise ValueError("مرچنت زرین‌پال نمی‌تواند خالی باشد.")
+                    try:
+                        import uuid
+
+                        uuid.UUID(merchant)
+                    except (ValueError, AttributeError):
+                        raise ValueError(
+                            "مرچنت زرین‌پال باید UUID معتبر باشد."
+                        ) from None
+                    value = merchant
                 if key == "card_number":
                     normalized_card = re.sub(r"[\s-]+", "", value).translate(
                         str.maketrans(
