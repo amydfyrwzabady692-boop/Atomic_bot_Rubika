@@ -19,13 +19,19 @@ class Database:
         if self.pool:
             await self.pool.close()
 
-    async def user(self, rubika_id: str, chat_id: str):
+    async def user(self, rubika_id: str, chat_id: str, display_name: str = ""):
         return await self.pool.fetchrow(
-            """INSERT INTO users(rubika_id,chat_id) VALUES($1,$2)
-               ON CONFLICT(rubika_id) DO UPDATE SET chat_id=EXCLUDED.chat_id
+            """INSERT INTO users(rubika_id,chat_id,display_name) VALUES($1,$2,$3)
+               ON CONFLICT(rubika_id) DO UPDATE SET
+                 chat_id=EXCLUDED.chat_id,
+                 display_name=CASE
+                   WHEN EXCLUDED.display_name<>'' THEN EXCLUDED.display_name
+                   ELSE users.display_name
+                 END
                RETURNING *""",
             rubika_id,
             chat_id,
+            (display_name or "")[:200],
         )
 
     async def is_admin(self, rubika_id: str, root_id: str) -> bool:

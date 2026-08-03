@@ -42,7 +42,7 @@ def admin_menu() -> dict:
                 ("admin_categories", "🗂 دسته‌بندی"),
             ],
             [("admin_finance", "💳 بخش مالی"), ("admin_receipts", "🧾 رسیدها")],
-            [("admin_users", "👥 کاربران"), ("admin_search", "🔎 جستجو")],
+            [("admin_users", "👥 کاربران"), ("admin_charge", "💰 شارژ کاربر")],
             [("admin_support", "🎧 پشتیبانی"), ("admin_broadcast", "📣 ارسال پیام")],
             [("admin_codes", "🎁 کدها"), ("admin_settings", "⚙️ تنظیمات")],
             [("admin_admins", "👮 مدیریت مدیران")],

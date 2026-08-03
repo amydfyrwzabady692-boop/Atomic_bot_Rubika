@@ -67,7 +67,11 @@ class Router:
             and not await self.db.claim_event(event["event_id"])
         ):
             return
-        user = await self.db.user(event["sender_id"], event["chat_id"])
+        user = await self.db.user(
+            event["sender_id"],
+            event["chat_id"],
+            event.get("display_name", ""),
+        )
         if user["blocked"] and not await self.db.is_admin(event["sender_id"], self.config.admin_id):
             await self.send(event["chat_id"], "🚫 حساب شما مسدود است.")
             return
@@ -82,6 +86,7 @@ class Router:
             "💳 بخش مالی": "admin_finance",
             "🧾 رسیدها": "admin_receipts",
             "👥 کاربران": "admin_users",
+            "💰 شارژ کاربر": "admin_charge",
             "🔎 جستجو": "admin_search",
             "🎧 پشتیبانی": "admin_support",
             "📣 ارسال پیام": "admin_broadcast",
@@ -1338,6 +1343,138 @@ class Router:
                 f"✅ مدیر {title} با شناسه {rubika_id} اضافه شد.",
                 menu=admin_menu(),
             )
+        elif state == "admin_code_add":
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            raw = event["text"].strip()
+            try:
+                kind, code, value, max_uses = raw.split("|", 3)
+            except ValueError:
+                await self.send(
+                    event["chat_id"],
+                    "❌ فرمت درست نیست. مثال: `gift|SALE10|100000|5` یا `discount|OFF20|20|10`",
+                )
+                return
+            kind = kind.strip()
+            code = code.strip().upper()
+            if kind not in {"gift", "discount"}:
+                await self.send(event["chat_id"], "❌ نوع کد فقط gift یا discount است.")
+                return
+            if not re.fullmatch(r"[A-Z0-9_-]{3,40}", code):
+                await self.send(event["chat_id"], "❌ ساختار کد معتبر نیست.")
+                return
+            try:
+                safe_value = int(value)
+                safe_max_uses = int(max_uses)
+            except ValueError:
+                await self.send(event["chat_id"], "❌ مقدار و تعداد باید عدد باشند.")
+                return
+            if safe_value <= 0 or safe_max_uses <= 0:
+                await self.send(event["chat_id"], "❌ مقدار و تعداد استفاده باید مثبت باشند.")
+                return
+            if kind == "discount" and safe_value > 99:
+                await self.send(event["chat_id"], "❌ درصد تخفیف باید بین ۱ تا ۹۹ باشد.")
+                return
+            if kind == "gift":
+                safe_value = checked_amount(safe_value, label="مبلغ کد هدیه")
+            await self.db.pool.execute(
+                """INSERT INTO promo_codes(code_type,code,value,max_uses)
+                   VALUES($1,upper($2),$3,$4)""",
+                kind,
+                code,
+                safe_value,
+                safe_max_uses,
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(
+                event["chat_id"],
+                f"✅ کد `{code}` با نوع {kind} و مقدار {safe_value} اضافه شد.",
+                menu=admin_menu(),
+            )
+        elif state == "admin_charge_one":
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            raw = event["text"].strip()
+            try:
+                user_id, amount = raw.split("|", 1)
+            except ValueError:
+                await self.send(
+                    event["chat_id"],
+                    "❌ فرمت درست نیست. مثال: `303|50000`",
+                )
+                return
+            try:
+                target_id = int(user_id.strip())
+                amount = checked_amount(amount, label="شارژ کاربر")
+            except ValueError as exc:
+                await self.send(event["chat_id"], f"❌ {exc}")
+                return
+            exists = await self.db.pool.fetchval(
+                "SELECT 1 FROM users WHERE id=$1", target_id
+            )
+            if not exists:
+                await self.send(
+                    event["chat_id"],
+                    "❌ کاربر پیدا نشد؛ شناسه داخلی را از «👥 کاربران» بگیر.",
+                )
+                return
+            async with self.db.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                        amount,
+                        target_id,
+                    )
+                    await conn.execute(
+                        """INSERT INTO wallet_ledger(user_id,amount,entry_type,reference)
+                           VALUES($1,$2,'admin_charge',$3)""",
+                        target_id,
+                        amount,
+                        f"admin:{event['sender_id']}:{target_id}:{os.urandom(8).hex()}",
+                    )
+            await self.db.set_session(event["sender_id"])
+            await self.send(
+                event["chat_id"],
+                f"✅ مبلغ {amount:,} تومان به کیف پول کاربر {target_id} اضافه شد.",
+                menu=admin_menu(),
+            )
+        elif state == "admin_charge_all":
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            raw = event["text"].strip().replace(",", "").replace(" ", "")
+            try:
+                amount = checked_amount(raw, label="شارژ همگانی")
+            except ValueError as exc:
+                await self.send(event["chat_id"], f"❌ {exc}")
+                return
+            batch = f"admin-all:{event['sender_id']}:{os.urandom(8).hex()}"
+            async with self.db.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        """INSERT INTO wallet_ledger(
+                             user_id,amount,entry_type,reference
+                           )
+                           SELECT id,$1,'admin_charge_all',$2||':'||id::text
+                           FROM users WHERE NOT blocked""",
+                        amount,
+                        batch,
+                    )
+                    await conn.execute(
+                        "UPDATE users SET balance=balance+$1 WHERE NOT blocked",
+                        amount,
+                    )
+            await self.db.set_session(event["sender_id"])
+            await self.send(
+                event["chat_id"],
+                f"✅ مبلغ {amount:,} تومان به کیف پول همه کاربران فعال اضافه شد.",
+                menu=admin_menu(),
+            )
         elif state == "admin_broadcast":
             if not await self.db.is_admin(
                 event["sender_id"], self.config.admin_id
@@ -1436,21 +1573,24 @@ class Router:
                     )
         elif action == "admin_users":
             rows = await self.db.pool.fetch(
-                "SELECT id,rubika_id,balance,blocked FROM users ORDER BY id LIMIT 20"
+                """SELECT id,display_name,rubika_id,balance,blocked
+                   FROM users ORDER BY id LIMIT 20"""
             )
             if not rows:
                 await self.send(chat, "کاربری وجود ندارد.")
                 return
+            def _user_label(r):
+                name = (r["display_name"] or "").strip()
+                return (
+                    f"{r['id']} | {name or '—'} | {r['rubika_id']} | {r['balance']:,} ت"
+                    + (" 🚫" if r["blocked"] else "")
+                )
             await self.send(
                 chat,
                 "👥 کاربران\n"
                 f"نمایش {len(rows)} کاربر از اول لیست (کل: "
                 f"{await self.db.pool.fetchval('SELECT count(*) FROM users')})\n\n"
-                + "\n".join(
-                    f"{r['id']} | {r['rubika_id']} | {r['balance']:,} ت"
-                    + (" 🚫" if r["blocked"] else "")
-                    for r in rows
-                )
+                + "\n".join(_user_label(r) for r in rows)
                 + "\n\nبرای بن/آنبن روی دکمه‌ها بزن:",
                 buttons=inline(
                     [
@@ -1653,21 +1793,35 @@ class Router:
                 """SELECT id,code,code_type,value,used_count,max_uses,active
                    FROM promo_codes ORDER BY id DESC LIMIT 50"""
             )
-            await self.send(
-                chat,
-                "🎁 کدها\n"
-                + (
+            lines = [
+                "🎁 کدهای تخفیف/هدیه\n",
+            ]
+            if rows:
+                lines.append(
                     "\n".join(
-                        f"#{row['id']} {row['code']} | {row['code_type']} "
+                        f"#{row['id']} `{row['code']}` | {row['code_type']} "
                         f"{row['value']} | {row['used_count']}/{row['max_uses']} | "
                         f"{'فعال' if row['active'] else 'حذف‌شده'}"
                         for row in rows
                     )
-                    or "کدی نیست."
                 )
-                + "\n\n"
-                + self.admin_help(action),
-            )
+            else:
+                lines.append("کدی نیست.")
+            lines.append("\nبرای افزودن، دکمه زیر را بزن:")
+            buttons = []
+            for row in rows[:20]:
+                if row["active"]:
+                    buttons.append(
+                        [
+                            (
+                                f"admin_code_del:{row['id']}",
+                                f"🗑 حذف {row['code']}",
+                            )
+                        ]
+                    )
+            buttons.append([("admin_code_add", "➕ افزودن کد")])
+            buttons.append([("home", "🏠 بازگشت")])
+            await self.send(chat, "\n".join(lines), buttons=inline(buttons))
         elif action == "admin_settings":
             admins = await self.db.pool.fetch(
                 "SELECT rubika_id,title FROM admins WHERE active ORDER BY created_at"
@@ -1722,9 +1876,82 @@ class Router:
                 "برای انصراف، دکمه زیر را بزن:",
                 buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
             )
+        elif action == "admin_charge":
+            await self.send(
+                chat,
+                "💰 شارژ کیف پول کاربر\n"
+                "یک گزینه را انتخاب کن:\n\n"
+                "• **شارژ یک کاربر خاص** — شناسه داخلی و مبلغ را بفرست\n"
+                "• **شارژ همگانی** — به همه کاربران فعال مبلغی اضافه کن",
+                buttons=inline(
+                    [
+                        [
+                            (
+                                "admin_charge_one",
+                                "👤 شارژ یک کاربر",
+                            ),
+                            ("admin_charge_all_btn", "📤 شارژ همگانی"),
+                        ]
+                    ]
+                ),
+            )
+        elif action == "admin_charge_one":
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_charge_one",
+                {},
+            )
+            await self.send(
+                chat,
+                "💰 شارژ یک کاربر\n"
+                "فرمت: `شناسه داخلی|مبلغ`\n"
+                "مثال: `303|50000`\n"
+                "برای دیدن شناسه‌ها: «👥 کاربران» را ببین.",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
+        elif action == "admin_charge_all_btn":
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_charge_all",
+                {},
+            )
+            await self.send(
+                chat,
+                "📤 شارژ همگانی\n"
+                "مبلغی را که به همه کاربران فعال اضافه شود بفرست:\n"
+                "مثال: `10000`",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
+        elif action == "admin_code_add":
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_code_add",
+                {},
+            )
+            await self.send(
+                chat,
+                "🎁 افزودن کد تخفیف/هدیه\n"
+                "فرمت: `نوع|کد|مقدار|تعداد استفاده`\n"
+                "- نوع: `gift` (مبلغ هدیه) یا `discount` (درصد تخفیف)\n"
+                "- مثال هدیه: `gift|SALE10|100000|5`\n"
+                "- مثال تخفیف: `discount|OFF20|20|10`\n\n"
+                "برای انصراف دکمه زیر را بزن:",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
+        elif action.startswith("admin_code_del:"):
+            code_arg = action.removeprefix("admin_code_del:")
+            if not code_arg.isdigit():
+                await self.send(chat, "❌ شناسه کد نامعتبر است.")
+                return
+            await self.db.pool.execute(
+                "UPDATE promo_codes SET active=false WHERE id=$1", int(code_arg)
+            )
+            await self.db.audit(event["sender_id"], "code_delete", details=code_arg)
+            await self.send(chat, f"🗑 کد {code_arg} حذف شد.")
+            await self.admin(event, "admin_codes")
         elif action == "admin_cancel_broadcast":
             await self.db.set_session(event["sender_id"])
-            await self.send(chat, "✖️ پیام همگانی لغو شد.", menu=admin_menu())
+            await self.send(chat, "✖️ عملیات لغو شد.", menu=admin_menu())
         elif action.startswith("admin_block:"):
             user_arg = action.removeprefix("admin_block:")
             if not user_arg.isdigit():
@@ -2310,15 +2537,17 @@ class Router:
                 )
                 if not row:
                     raise ValueError("کاربر پیدا نشد.")
+                name = (row.get("display_name") or "").strip() or "—"
                 await self.send(
                     chat,
                     f"کاربر {row['id']}\n"
-                    f"{row['rubika_id']}\n"
-                    f"موجودی: {row['balance']:,}\n"
-                    f"خریدها: {row['purchases']:,}\n"
-                    f"زیرمجموعه‌ها: {row['referral_count']:,}\n"
-                    f"کارت: {'تأییدشده' if row['card_verified'] else 'تأییدنشده'}\n"
-                    f"وضعیت: {'مسدود' if row['blocked'] else 'فعال'}",
+                    f"👤 نام: {name}\n"
+                    f"🆔 روبیکا: {row['rubika_id']}\n"
+                    f"💰 موجودی: {row['balance']:,}\n"
+                    f"🛒 خریدها: {row['purchases']:,}\n"
+                    f"👥 زیرمجموعه‌ها: {row['referral_count']:,}\n"
+                    f"💳 کارت: {'تأییدشده' if row['card_verified'] else 'تأییدنشده'}\n"
+                    f"وضعیت: {'مسدود 🚫' if row['blocked'] else 'فعال ✅'}",
                 )
                 return
             elif name in {"/users_balance", "/users_referral", "/users_card"}:
@@ -2328,13 +2557,14 @@ class Router:
                     "/users_card": "card_verified",
                 }
                 rows = await self.db.pool.fetch(
-                    f"""SELECT id,rubika_id,balance,card_number FROM users
+                    f"""SELECT id,display_name,rubika_id,balance,card_number FROM users
                         WHERE {clauses[name]} ORDER BY id DESC LIMIT 100"""
                 )
                 await self.send(
                     chat,
                     "\n".join(
-                        f"{row['id']} | {row['rubika_id']} | {row['balance']:,}"
+                        f"{row['id']} | {(row['display_name'] or '—').strip()} | "
+                        f"{row['rubika_id']} | {row['balance']:,}"
                         + (
                             f" | ****{row['card_number'][-4:]}"
                             if name == "/users_card" and row["card_number"]

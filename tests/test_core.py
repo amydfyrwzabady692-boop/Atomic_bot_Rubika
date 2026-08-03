@@ -223,6 +223,28 @@ class DatabaseTests(unittest.TestCase):
         source = inspect.getsource(Router.pay_order)
         self.assertIn('os.getenv(\n                "CARD_TRANSFER_NUMBER"', source)
 
+    def test_admin_panel_has_interactive_flows(self):
+        handle_source = inspect.getsource(Router.handle)
+        admin_source = inspect.getsource(Router.admin)
+        state_source = inspect.getsource(Router.handle_state)
+        # Admin chat_keypad labels map to actions for clients that send text.
+        self.assertIn('"👥 کاربران": "admin_users"', handle_source)
+        self.assertIn('"💳 بخش مالی": "admin_finance"', handle_source)
+        # Interactive charge flows exist.
+        self.assertIn("admin_charge", admin_source)
+        self.assertIn("admin_charge_one", state_source)
+        self.assertIn("admin_charge_all", state_source)
+        # Interactive promo code flows exist.
+        self.assertIn("admin_code_add", admin_source)
+        self.assertIn("admin_code_del", admin_source)
+        # Interactive admin add/remove exists.
+        self.assertIn("admin_add_admin", state_source)
+        self.assertIn("admin_remove:", admin_source)
+        # Broadcast is state-driven.
+        self.assertIn("admin_broadcast", state_source)
+        # Users list shows display name.
+        self.assertIn("display_name", admin_source)
+
     def test_receipt_review_has_buttons_and_safe_command_validation(self):
         handle_source = inspect.getsource(Router.handle)
         command_source = inspect.getsource(Router.admin_command)

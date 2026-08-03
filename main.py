@@ -108,6 +108,9 @@ class Application:
             chat = data.get("chat") if isinstance(data.get("chat"), dict) else data
             sender_id = str(chat.get("user_id") or "")
             if sender_id:
+                first = str(chat.get("first_name") or "")
+                last = str(chat.get("last_name") or "")
+                display_name = " ".join(part for part in (first, last) if part).strip()
                 event = {
                     "event_id": f"started:{chat_id}:{sender_id}",
                     "chat_id": chat_id,
@@ -116,6 +119,7 @@ class Application:
                     "text": "/start",
                     "button_id": "",
                     "file": None,
+                    "display_name": display_name,
                 }
         if not event:
             return
