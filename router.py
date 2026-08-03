@@ -1912,15 +1912,59 @@ class Router:
             await self.send(
                 chat,
                 "💳 تنظیمات مالی\n"
-                f"پرداخت‌ها: {'فعال' if values['payments_enabled']=='1' else 'غیرفعال'}\n"
-                f"زرین‌پال: {'فعال' if values['zarinpal_enabled']=='1' else 'غیرفعال'}\n"
+                f"پرداخت‌ها: {'فعال ✅' if values['payments_enabled']=='1' else 'غیرفعال ❌'}\n"
+                f"زرین‌پال: {'فعال ✅' if values['zarinpal_enabled']=='1' else 'غیرفعال ❌'}\n"
+                f"کارت‌به‌کارت: {'فعال ✅' if values['card_enabled']=='1' else 'غیرفعال ❌'}\n"
                 f"مرچنت: {merchant_text}\n"
-                f"کارت‌به‌کارت: {'فعال' if values['card_enabled']=='1' else 'غیرفعال'}\n"
                 f"کارت: {masked_card}\n"
                 f"دارنده: {values['card_holder'] or '—'}\n"
                 f"بانک: {values['card_bank'] or '—'}\n\n"
-                + self.admin_help(action),
+                "برای تغییر وضعیت، دکمه‌ها را بزن:",
+                buttons=inline(
+                    [
+                        [
+                            (
+                                "admin_toggle:payments_enabled",
+                                ("🔴 فروش غیرفعال" if values["payments_enabled"] == "1"
+                                 else "🟢 فروش فعال"),
+                            )
+                        ],
+                        [
+                            (
+                                "admin_toggle:zarinpal_enabled",
+                                ("🔴 زرین‌پال غیرفعال" if values["zarinpal_enabled"] == "1"
+                                 else "🟢 زرین‌پال فعال"),
+                            )
+                        ],
+                        [
+                            (
+                                "admin_toggle:card_enabled",
+                                ("🔴 کارت غیرفعال" if values["card_enabled"] == "1"
+                                 else "🟢 کارت فعال"),
+                            )
+                        ],
+                        [("admin_fx", "💵 نرخ و سود")],
+                        [("admin_sync_prices", "🔄 بروزرسانی قیمت جم")],
+                    ]
+                ),
             )
+        elif action.startswith("admin_toggle:"):
+            key = action.removeprefix("admin_toggle:")
+            allowed_toggle = {
+                "payments_enabled",
+                "zarinpal_enabled",
+                "card_enabled",
+                "sales_enabled",
+            }
+            if key not in allowed_toggle:
+                await self.send(chat, "❌ کلید تنظیم نامعتبر است.")
+                return
+            current = await self.db.setting(key, "1")
+            new_value = "0" if current == "1" else "1"
+            await self.db.set_setting(key, new_value)
+            await self.db.audit(event["sender_id"], "setting", details=f"{key}={new_value}")
+            await self.send(chat, f"✅ تنظیم {key} به {new_value} تغییر کرد.")
+            await self.admin(event, "admin_finance")
         elif action == "admin_codes":
             rows = await self.db.pool.fetch(
                 """SELECT id,code,code_type,value,used_count,max_uses,active
@@ -1956,9 +2000,7 @@ class Router:
             buttons.append([("home", "🏠 بازگشت")])
             await self.send(chat, "\n".join(lines), buttons=inline(buttons))
         elif action == "admin_settings":
-            admins = await self.db.pool.fetch(
-                "SELECT rubika_id,title FROM admins WHERE active ORDER BY created_at"
-            )
+            sales = await self.db.setting("sales_enabled", "1")
             departments = await self.db.pool.fetch(
                 "SELECT id,title FROM departments WHERE active ORDER BY id"
             )
@@ -1968,15 +2010,8 @@ class Router:
             await self.send(
                 chat,
                 "⚙️ تنظیمات فروشگاه\n"
-                "مدیران:\n"
-                + (
-                    "\n".join(
-                        f"• {row['rubika_id']} | {row['title'] or 'مدیر'}"
-                        for row in admins
-                    )
-                    or "• فقط مدیر اصلی"
-                )
-                + "\n\nدپارتمان‌ها:\n"
+                f"فروش: {'فعال ✅' if sales == '1' else 'غیرفعال ❌'}\n\n"
+                "دپارتمان‌ها:\n"
                 + (
                     "\n".join(
                         f"#{row['id']} {row['title']}" for row in departments
@@ -1990,9 +2025,41 @@ class Router:
                         for row in channels
                     )
                     or "غیرفعال"
-                )
-                + "\n\n"
-                + self.admin_help(action),
+                ),
+                buttons=inline(
+                    [
+                        [
+                            (
+                                "admin_toggle:sales_enabled",
+                                ("🔴 فروش غیرفعال" if sales == "1"
+                                 else "🟢 فروش فعال"),
+                            )
+                        ],
+                        [
+                            (
+                                "admin_settings_text",
+                                "✏️ ویرایش متن پیام‌ها",
+                            )
+                        ],
+                        [("admin_admins", "👮 مدیریت مدیران")],
+                    ]
+                ),
+            )
+        elif action == "admin_settings_text":
+            welcome = await self.db.setting("welcome_text", "")
+            help_text = await self.db.setting("help_text", "")
+            support_prompt = await self.db.setting("support_prompt", "")
+            await self.send(
+                chat,
+                "✏️ ویرایش متن پیام‌ها\n"
+                "برای ویرایش هر متن، دستور زیر را بفرست:\n\n"
+                f"متن خوش‌آمد:\n`{welcome[:80] or '—'}`\n"
+                f"→ /setting welcome_text متن\n\n"
+                f"متن راهنما:\n`{help_text[:80] or '—'}`\n"
+                f"→ /setting help_text متن\n\n"
+                f"پیام پشتیبانی:\n`{support_prompt[:80] or '—'}`\n"
+                f"→ /setting support_prompt متن",
+                buttons=inline([[("admin_settings", "🔙 بازگشت")]]),
             )
         elif action == "admin_search":
             await self.send(chat, self.admin_help(action))

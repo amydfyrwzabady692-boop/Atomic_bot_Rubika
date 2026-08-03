@@ -252,6 +252,13 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("admin_broadcast", state_source)
         # Users list shows display name.
         self.assertIn("display_name", admin_source)
+        # Operations dashboard, shop submenu, orders, toggles exist.
+        self.assertIn("admin_ops", admin_source)
+        self.assertIn("admin_shop", admin_source)
+        self.assertIn("admin_orders", admin_source)
+        self.assertIn("admin_toggle:", admin_source)
+        self.assertIn("admin_sync_prices", admin_source)
+        self.assertIn("admin_settings_text", admin_source)
 
     def test_receipt_review_has_buttons_and_safe_command_validation(self):
         handle_source = inspect.getsource(Router.handle)
