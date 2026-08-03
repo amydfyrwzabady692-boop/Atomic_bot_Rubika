@@ -282,6 +282,7 @@ INSERT INTO settings(key,value) VALUES
  ('payments_enabled','1'),
  ('zarinpal_enabled','1'),
  ('zarinpal_merchant_id',''),
+ ('gem_profit_percent','7'),
  ('card_enabled','1'),
  ('card_number',''),
  ('card_holder',''),

@@ -600,15 +600,17 @@ class Application:
         if not catalogue.get("ok"):
             log.warning("Price sync skipped: %s", catalogue.get("error"))
             return
+        profit_percent = await self.gem_profit_percent()
         updated = await self.db.sync_gem_prices_from_catalogue(
             items=catalogue["items"],
             rate_value=rate["rate"],
-            profit_percent=7,
+            profit_percent=profit_percent,
         )
         log.info(
-            "Gem price sync done: %d updated, rate=%s, source=%s",
+            "Gem price sync done: %d updated, rate=%s, profit=%d%%, source=%s",
             updated,
             rate["rate"],
+            profit_percent,
             rate["source"],
         )
         return {
@@ -616,7 +618,17 @@ class Application:
             "updated": updated,
             "rate": rate["rate"],
             "source": rate["source"],
+            "profit_percent": profit_percent,
         }
+
+    async def gem_profit_percent(self) -> int:
+        """درصد سود بسته‌های جم؛ از تنظیم دیتابیس خوانده می‌شود (پیش‌فرض ۷)."""
+        raw = await self.db.setting("gem_profit_percent", "7")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 7
+        return max(1, min(200, value))
 
     async def reconcile_gateway_payments(self):
         rows = await self.db.pool.fetch(

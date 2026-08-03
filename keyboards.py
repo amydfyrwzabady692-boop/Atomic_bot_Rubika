@@ -42,7 +42,8 @@ def admin_menu() -> dict:
             [("admin_receipts", "🧾 رسیدها"), ("admin_orders", "📦 سفارش‌ها")],
             [("admin_support", "🎧 پشتیبانی"), ("admin_broadcast", "📣 پیام همگانی")],
             [("admin_sync_prices", "🔄 بروزرسانی قیمت جم"), ("admin_fx", "💵 نرخ و سود")],
-            [("admin_settings", "⚙️ تنظیمات"), ("admin_admins", "👮 مدیریت مدیران")],
+            [("admin_set_profit", "📈 درصد سود جم"), ("admin_settings", "⚙️ تنظیمات")],
+            [("admin_admins", "👮 مدیریت مدیران")],
             [("home", "🏠 منوی کاربر")],
         ]
     )

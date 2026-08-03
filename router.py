@@ -98,6 +98,7 @@ class Router:
             "📦 سفارش‌ها": "admin_orders",
             "📣 پیام همگانی": "admin_broadcast",
             "🔄 بروزرسانی قیمت جم": "admin_sync_prices",
+            "📈 درصد سود جم": "admin_set_profit",
         }
         action = _admin_label_map.get(action, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
@@ -1480,6 +1481,40 @@ class Router:
                 f"✅ مبلغ {amount:,} تومان به کیف پول همه کاربران فعال اضافه شد.",
                 menu=admin_menu(),
             )
+        elif state == "admin_set_profit":
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            raw = (
+                event["text"]
+                .strip()
+                .replace("٪", "")
+                .replace("%", "")
+                .replace(",", "")
+            )
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                await self.send(
+                    event["chat_id"],
+                    "❌ فقط عدد بفرست (مثلاً 10).",
+                )
+                return
+            if not 1 <= value <= 200:
+                await self.send(
+                    event["chat_id"],
+                    "❌ درصد باید بین ۱ تا ۲۰۰ باشد.",
+                )
+                return
+            await self.db.set_setting("gem_profit_percent", str(value))
+            await self.db.set_session(event["sender_id"])
+            await self.send(
+                event["chat_id"],
+                f"✅ درصد سود بسته‌های جم به {value}٪ تغییر کرد.\n"
+                "برای اعمال روی قیمت‌ها، «🔄 بروزرسانی قیمت جم» را بزن.",
+                menu=admin_menu(),
+            )
         elif state == "admin_broadcast":
             if not await self.db.is_admin(
                 event["sender_id"], self.config.admin_id
@@ -1837,9 +1872,21 @@ class Router:
                 chat,
                 f"✅ بروزرسانی قیمت جم انجام شد.\n"
                 f"تعداد به‌روزرسانی‌شده: {result['updated']}\n"
+                f"درصد سود: {result['profit_percent']}٪\n"
                 f"نرخ دلار لحظه‌ای: {result['rate']:,} تومان ({result['source']})",
                 menu=admin_menu(),
             )
+        elif action == "admin_set_profit":
+            current = await self.gem_profit_percent()
+            await self.send(
+                chat,
+                f"📈 درصد سود بسته‌های جم\n"
+                f"درصد فعلی: {current}٪\n\n"
+                "مقدار جدید را بفرست (بین ۱ تا ۲۰۰):\n"
+                "مثال: `10` یعنی ۱۰٪ سود",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
+            await self.db.set_session(event["sender_id"], "admin_set_profit", {})
         elif action == "admin_products":
             rows = await self.db.pool.fetch(
                 """SELECT id,kind,title,price,stock,active
@@ -2854,6 +2901,15 @@ class Router:
                 "❌ عملیات انجام نشد؛ ورودی یا وضعیت فعلی را بررسی کن.",
             )
 
+    async def gem_profit_percent(self) -> int:
+        """درصد سود بسته‌های جم؛ از تنظیم دیتابیس (پیش‌فرض ۷)."""
+        raw = await self.db.setting("gem_profit_percent", "7")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 7
+        return max(1, min(200, value))
+
     async def run_gem_price_sync_router(self):
         """بروزرسانی دستی قیمت جم با نرخ لحظه‌ای دلار + کاتالوگ G2Bulk."""
         rate = await usd_toman_rate(
@@ -2864,16 +2920,18 @@ class Router:
         catalogue = await self.g2.catalogue()
         if not catalogue.get("ok"):
             return {"ok": False, "error": catalogue.get("error")}
+        profit_percent = await self.gem_profit_percent()
         updated = await self.db.sync_gem_prices_from_catalogue(
             items=catalogue["items"],
             rate_value=rate["rate"],
-            profit_percent=7,
+            profit_percent=profit_percent,
         )
         return {
             "ok": True,
             "updated": updated,
             "rate": rate["rate"],
             "source": rate["source"],
+            "profit_percent": profit_percent,
         }
 
     async def review_join(self, admin_id, user_id, approved):
