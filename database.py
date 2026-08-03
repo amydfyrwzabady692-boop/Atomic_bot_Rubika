@@ -972,3 +972,73 @@ class Database:
             target,
             details[:1000],
         )
+
+    async def sync_gem_prices_from_catalogue(
+        self, *, items, rate_value, profit_percent=7
+    ):
+        """به‌روزرسانی خودکار قیمت و هزینه دلاری بسته‌های جم از کاتالوگ G2Bulk.
+
+        هر بسته‌ای که supplier_sku با نام کاتالوگ مطابقت داشته باشد، هزینه دلاری
+        و قیمت فروش (با سود مشخص) آن بروزرسانی می‌شود. تعداد به‌روزرسانی‌شده
+        برگردانده می‌شود.
+        """
+        from supplier import compute_gem_sale_price
+
+        updated = 0
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for item in items:
+                    sku = item["name"].strip()
+                    cost_usd = item["cost_usd"]
+                    rows = await conn.fetch(
+                        """SELECT id,price,supplier_cost_usd FROM products
+                           WHERE kind='gem' AND supplier_sku=$1 AND active""",
+                        sku,
+                    )
+                    if not rows:
+                        continue
+                    new_price = await compute_gem_sale_price(
+                        cost_usd, rate_value, profit_percent
+                    )
+                    for row in rows:
+                        old_cost = (
+                            float(row["supplier_cost_usd"])
+                            if row["supplier_cost_usd"] is not None
+                            else None
+                        )
+                        old_price = int(row["price"])
+                        if (
+                            old_cost is not None
+                            and abs(old_cost - float(cost_usd)) < 1e-9
+                            and old_price == new_price
+                        ):
+                            continue
+                        await conn.execute(
+                            """UPDATE products SET supplier_cost_usd=$1, price=$2
+                               WHERE id=$3""",
+                            str(cost_usd),
+                            new_price,
+                            row["id"],
+                        )
+                        updated += 1
+                await conn.execute(
+                    """INSERT INTO settings(key,value,updated_at)
+                       VALUES('gem_price_last_sync',now()::text,now())
+                       ON CONFLICT(key) DO UPDATE
+                       SET value=EXCLUDED.value,updated_at=now()""",
+                )
+        return updated
+
+    async def setting_timestamp(self, key: str):
+        """برگرداندن timestamp ذخیره‌شده برای کلید، یا None اگر نباشد."""
+        value = await self.pool.fetchval(
+            "SELECT value FROM settings WHERE key=$1", key
+        )
+        if not value:
+            return None
+        try:
+            from datetime import datetime
+
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None

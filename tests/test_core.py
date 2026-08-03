@@ -14,7 +14,7 @@ from payment_safety import checked_amount, order_amounts, valid_card_number
 from payments import Zarinpal
 from router import Router
 from rubika_api import normalize_event
-from supplier import G2Bulk, g2_idempotency_key
+from supplier import G2Bulk, compute_gem_sale_price, g2_idempotency_key
 
 
 class EventTests(unittest.TestCase):
@@ -92,6 +92,14 @@ class FinancialTests(unittest.TestCase):
             result = asyncio.run(supplier.order("110", "12345", 91))
         self.assertFalse(result["ok"])
         self.assertTrue(result["uncertain"])
+
+    def test_gem_sale_price_rounds_up_to_nearest_thousand_with_profit(self):
+        # 0.935 USD * 92,000 toman = 86,020 * 1.07 = 92,041 -> rounds to 93,000
+        price = asyncio.run(compute_gem_sale_price("0.935", 92000, profit_percent=7))
+        self.assertEqual(price, 93000)
+        # Rounds up even when the raw value is already a whole thousand.
+        price2 = asyncio.run(compute_gem_sale_price("1.0", 100000, profit_percent=7))
+        self.assertEqual(price2, 107000)
 
     def test_ambiguous_order_can_be_recovered_by_exact_remark(self):
         supplier = G2Bulk()

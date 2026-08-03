@@ -50,6 +50,7 @@ class Application:
             [
                 asyncio.create_task(self.fulfillment_loop()),
                 asyncio.create_task(self.cleanup_loop()),
+                asyncio.create_task(self.price_sync_loop()),
             ]
         )
 
@@ -553,6 +554,60 @@ class Application:
             except Exception:
                 log.exception("Cleanup failed")
                 await asyncio.sleep(60)
+
+    async def price_sync_loop(self):
+        """به‌روزرسانی خودکار قیمت بسته‌های جم هر ۲۴ ساعت.
+
+        هر ۲۴ ساعت نرخ زنده دلار و کاتالوگ G2Bulk را می‌گیرد و قیمت فروش هر
+        بسته جم را با سود ۷٪ محاسبه و در دیتابیس ذخیره می‌کند. اگر کمتر از
+        ۲۴ ساعت از آخرین بروزرسانی گذشته باشد، صبر می‌کند.
+        """
+        while True:
+            try:
+                last = await self.db.setting_timestamp("gem_price_last_sync")
+                now = await self.db.pool.fetchval("SELECT now()")
+                if last is not None:
+                    elapsed_hours = (now - last).total_seconds() / 3600
+                    if elapsed_hours < 24:
+                        await asyncio.sleep(max(60, int((24 - elapsed_hours) * 3600)))
+                        continue
+                await self.run_gem_price_sync()
+                await asyncio.sleep(24 * 3600)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Price sync failed")
+                await asyncio.sleep(5 * 60)
+
+    async def run_gem_price_sync(self):
+        """اجرای یک‌بار بروزرسانی قیمت؛ خروجی خلاصه برای لاگ."""
+        rate = await usd_toman_rate(
+            await self.db.setting("usd_toman_rate", "")
+        )
+        if not rate.get("ok"):
+            log.warning("Price sync skipped: %s", rate.get("error"))
+            return
+        catalogue = await self.g2.catalogue()
+        if not catalogue.get("ok"):
+            log.warning("Price sync skipped: %s", catalogue.get("error"))
+            return
+        updated = await self.db.sync_gem_prices_from_catalogue(
+            items=catalogue["items"],
+            rate_value=rate["rate"],
+            profit_percent=7,
+        )
+        log.info(
+            "Gem price sync done: %d updated, rate=%s, source=%s",
+            updated,
+            rate["rate"],
+            rate["source"],
+        )
+        return {
+            "ok": True,
+            "updated": updated,
+            "rate": rate["rate"],
+            "source": rate["source"],
+        }
 
     async def reconcile_gateway_payments(self):
         rows = await self.db.pool.fetch(

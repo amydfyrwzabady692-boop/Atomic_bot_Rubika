@@ -1,6 +1,6 @@
 import os
 import uuid
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import aiohttp
 
@@ -299,3 +299,45 @@ class G2Bulk:
             "ok": False,
             "error": data.get("message") or "وضعیت سفارش G2Bulk قابل تشخیص نیست.",
         }
+
+    async def catalogue(self):
+        """برگشت کاتالوگ زنده G2Bulk با هزینه دلاری هر بسته.
+
+        خروجی: {'ok': bool, 'items': [{name, cost_usd, amount}], 'error'?}
+        """
+        if not self.key:
+            return {"ok": False, "error": "G2BULK_API_KEY تنظیم نشده است."}
+        data = await self._call("GET", f"/games/{self.game}/catalogue")
+        if not data.get("success"):
+            return {
+                "ok": False,
+                "error": data.get("message") or "دریافت کاتالوگ G2Bulk ناموفق بود.",
+            }
+        items = []
+        for item in data.get("catalogues") or []:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                cost = Decimal(str(item.get("amount")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if cost <= 0:
+                continue
+            match = __import__("re").search(r"\d+", name)
+            amount = int(match.group()) if match else None
+            items.append({"name": name, "cost_usd": cost, "amount": amount})
+        return {"ok": True, "items": items}
+
+
+async def compute_gem_sale_price(cost_usd, usd_toman_rate_value, profit_percent=7):
+    """قیمت فروش هر بسته جم با سود مشخص.
+
+    price_toman = ceil(cost_usd * rate * (1 + profit_percent/100) / 1000) * 1000
+    یعنی همیشه به نزدیک‌ترین هزار تومان بالاتر گرد می‌شود.
+    """
+    cost_usd = Decimal(str(cost_usd))
+    rate = Decimal(str(usd_toman_rate_value))
+    profit = Decimal(1) + (Decimal(profit_percent) / Decimal(100))
+    raw = (cost_usd * rate * profit).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    return (int(raw) // 1000 + (1 if int(raw) % 1000 else 0)) * 1000
