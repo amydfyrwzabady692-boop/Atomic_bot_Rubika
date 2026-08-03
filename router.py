@@ -93,6 +93,10 @@ class Router:
             "🎁 کدها": "admin_codes",
             "⚙️ تنظیمات": "admin_settings",
             "👮 مدیریت مدیران": "admin_admins",
+            "🚨 مرکز عملیات": "admin_ops",
+            "🛍 مدیریت فروشگاه": "admin_shop",
+            "📦 سفارش‌ها": "admin_orders",
+            "📣 پیام همگانی": "admin_broadcast",
         }
         action = _admin_label_map.get(action, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
@@ -1522,6 +1526,105 @@ class Router:
                 f"جمع فروش: {s['revenue']:,} تومان\n"
                 f"مغایرت دفتر کیف پول: {s['wallet_mismatches']:,}",
             )
+        elif action == "admin_ops":
+            # مرکز عملیات و هشدارها — مشابه admx_ops تلگرام
+            ops = await self.db.pool.fetchrow(
+                """SELECT
+                  (SELECT count(*) FROM orders WHERE status IN ('pending','paid','processing')) open_orders,
+                  (SELECT count(*) FROM orders WHERE status='delivery_failed') failed,
+                  (SELECT count(*) FROM receipts WHERE status='pending') pending_receipts,
+                  (SELECT count(*) FROM tickets WHERE status='open') open_tickets,
+                  (SELECT count(*) FROM payments WHERE status='pending' AND expires_at>now()) active_payments,
+                  (SELECT count(*) FROM orders WHERE status='pending' AND created_at>now()-interval '1 day') pending_24h,
+                  (SELECT count(*) FROM orders WHERE paid_at IS NOT NULL AND paid_at>now()-interval '1 day') sales_24h
+                """
+            )
+            alerts = (
+                int(ops["pending_receipts"]) + int(ops["failed"])
+                + int(ops["open_tickets"]) + int(ops["open_orders"])
+            )
+            await self.send(
+                chat,
+                f"🚨 مرکز عملیات و هشدارها\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"سفارش‌های باز: {ops['open_orders']:,}\n"
+                f"تحویل ناموفق: {ops['failed']:,}\n"
+                f"رسید در انتظار: {ops['pending_receipts']:,}\n"
+                f"تیکت باز: {ops['open_tickets']:,}\n"
+                f"پرداخت فعال: {ops['active_payments']:,}\n"
+                f"فروش ۲۴ ساعت اخیر: {ops['sales_24h']:,}\n"
+                f"سفارش‌های pending دیروز: {ops['pending_24h']:,}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"{'🚨' if alerts else '✅'} هشدارهای قابل اقدام: {alerts:,}",
+                buttons=inline(
+                    [
+                        [
+                            (
+                                "admin_receipts",
+                                f"🧾 رسیدها ({ops['pending_receipts']:,})",
+                            )
+                        ],
+                        [
+                            (
+                                "admin_orders",
+                                f"📦 سفارش‌های باز ({ops['open_orders']:,})",
+                            )
+                        ],
+                        [
+                            (
+                                "admin_support",
+                                f"🎧 تیکت‌ها ({ops['open_tickets']:,})",
+                            )
+                        ],
+                    ]
+                ),
+            )
+        elif action == "admin_shop":
+            await self.send(
+                chat,
+                "🛍 مدیریت فروشگاه\nیک بخش را انتخاب کن:",
+                buttons=inline(
+                    [
+                        [("admin_products", "📦 محصولات")],
+                        [("admin_categories", "🗂 دسته‌بندی‌ها")],
+                        [("admin_codes", "🎁 کدها")],
+                        [("admin_finance", "💳 امور مالی")],
+                        [("home", "🏠 بازگشت")],
+                    ]
+                ),
+            )
+        elif action == "admin_orders":
+            open_rows = await self.db.pool.fetch(
+                """SELECT o.id,o.status,o.total_amount-o.discount_amount total,
+                          u.rubika_id
+                   FROM orders o JOIN users u ON u.id=o.user_id
+                   WHERE o.status IN ('pending','paid','processing')
+                   ORDER BY o.id DESC LIMIT 20"""
+            )
+            failed_rows = await self.db.pool.fetch(
+                """SELECT o.id,o.status,o.total_amount-o.discount_amount total,
+                          u.rubika_id
+                   FROM orders o JOIN users u ON u.id=o.user_id
+                   WHERE o.status='delivery_failed'
+                   ORDER BY o.id DESC LIMIT 20"""
+            )
+            text = "📦 سفارش‌های باز:\n"
+            if open_rows:
+                text += "\n".join(
+                    f"#{r['id']} | {r['status']} | {r['total']:,} ت | {r['rubika_id']}"
+                    for r in open_rows
+                )
+            else:
+                text += "موردی نیست."
+            text += "\n\n⚠️ تحویل ناموفق:\n"
+            if failed_rows:
+                text += "\n".join(
+                    f"#{r['id']} | {r['total']:,} ت | {r['rubika_id']}"
+                    for r in failed_rows
+                )
+            else:
+                text += "موردی نیست."
+            await self.send(chat, text)
         elif action == "admin_receipts":
             rows = await self.db.pool.fetch(
                 """SELECT r.id,r.payment_id,r.user_id,r.source_chat_id,

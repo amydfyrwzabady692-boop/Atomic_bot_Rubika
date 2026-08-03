@@ -36,15 +36,12 @@ def main_menu() -> dict:
 def admin_menu() -> dict:
     return keypad(
         [
-            [("admin_stats", "📊 آمار کلی"), ("admin_fx", "💵 نرخ و سود")],
-            [
-                ("admin_products", "📦 مدیریت محصولات"),
-                ("admin_categories", "🗂 دسته‌بندی"),
-            ],
-            [("admin_finance", "💳 بخش مالی"), ("admin_receipts", "🧾 رسیدها")],
+            [("admin_ops", "🚨 مرکز عملیات"), ("admin_stats", "📊 آمار کلی")],
             [("admin_users", "👥 کاربران"), ("admin_charge", "💰 شارژ کاربر")],
-            [("admin_support", "🎧 پشتیبانی"), ("admin_broadcast", "📣 ارسال پیام")],
-            [("admin_codes", "🎁 کدها"), ("admin_settings", "⚙️ تنظیمات")],
+            [("admin_shop", "🛍 مدیریت فروشگاه"), ("admin_finance", "💳 امور مالی")],
+            [("admin_receipts", "🧾 رسیدها"), ("admin_orders", "📦 سفارش‌ها")],
+            [("admin_support", "🎧 پشتیبانی"), ("admin_broadcast", "📣 پیام همگانی")],
+            [("admin_fx", "💵 نرخ و سود"), ("admin_settings", "⚙️ تنظیمات")],
             [("admin_admins", "👮 مدیریت مدیران")],
             [("home", "🏠 منوی کاربر")],
         ]
