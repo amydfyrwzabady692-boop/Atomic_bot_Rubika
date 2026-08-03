@@ -100,6 +100,17 @@ class Router:
         if action == "/admin" or action.startswith("admin_"):
             if is_admin:
                 await self.admin(event, action)
+            elif action == "/admin":
+                # وقتی مالک واقعی هنوز RUBIKA_ADMIN_ID را تنظیم نکرده، این پیام
+                # شناسه روبیکای او را نشان می‌دهد تا بتواند دسترسی ادمین بگیرد.
+                await self.send(
+                    event["chat_id"],
+                    "⛔️ دسترسی مدیر ندارید.\n"
+                    f"🆔 شناسه شما: `{event['sender_id']}`\n\n"
+                    "اگر مالک ربات هستید، این شناسه را در متغیر `RUBIKA_ADMIN_ID` "
+                    "فایل `.env` روی سرور قرار دهید و ربات را دوباره اجرا کنید.\n"
+                    "اگر مدیر هستید، از مالک بخواهید شما را با `/admin_add` اضافه کند.",
+                )
             else:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
             return
