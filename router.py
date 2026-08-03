@@ -76,6 +76,14 @@ class Router:
             await self.db.set_session(event["sender_id"])
             await self.start(event, user)
             return
+        if action == "/myid":
+            # شناسه روبیکای خودت را ببین؛ مالک برای تنظیم RUBIKA_ADMIN_ID به این
+            # نیاز دارد و هر کاربر هم می‌تواند برای پشتیبانی آن را بفرستد.
+            await self.send(
+                event["chat_id"],
+                f"🆔 شناسه روبیکای شما:\n{event['sender_id']}",
+            )
+            return
         is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
         receipt_in_progress = False
         if event.get("file"):
@@ -2035,19 +2043,28 @@ class Router:
                     "UPDATE promo_codes SET active=false WHERE id=$1", int(args)
                 )
             elif name == "/charge":
-                user_id, amount = args.split()
+                try:
+                    user_id, amount = args.split()
+                except ValueError:
+                    raise ValueError("فرمت درست: /charge USER_ID AMOUNT") from None
                 amount = checked_amount(amount, label="شارژ کاربر")
+                target_id = int(user_id)
+                exists = await self.db.pool.fetchval(
+                    "SELECT 1 FROM users WHERE id=$1", target_id
+                )
+                if not exists:
+                    raise ValueError("کاربر پیدا نشد؛ شناسه داخلی را از /users_balance بگیر.")
                 async with self.db.pool.acquire() as conn:
                     async with conn.transaction():
                         await conn.execute(
                             "UPDATE users SET balance=balance+$1 WHERE id=$2",
                             amount,
-                            int(user_id),
+                            target_id,
                         )
                         await conn.execute(
                             """INSERT INTO wallet_ledger(user_id,amount,entry_type,reference)
                                VALUES($1,$2,'admin_charge',$3)""",
-                            int(user_id),
+                            target_id,
                             amount,
                             f"admin:{admin_id}:{user_id}:{os.urandom(8).hex()}",
                         )
