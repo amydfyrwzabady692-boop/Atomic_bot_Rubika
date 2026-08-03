@@ -1306,6 +1306,71 @@ class Router:
                     "Receipt %s saved but admin notification was incomplete",
                     receipt["id"],
                 )
+        elif state == "admin_add_admin":
+            if event["sender_id"] != self.config.admin_id:
+                await self.db.set_session(event["sender_id"])
+                await self.send(
+                    event["chat_id"], "⛔️ فقط مالک اصلی می‌تواند مدیر اضافه کند."
+                )
+                return
+            parts = event["text"].strip().split(maxsplit=1)
+            if len(parts) < 2:
+                await self.send(
+                    event["chat_id"],
+                    "فرمت درست: `u0...` عنوان\nمثال: `u0xxxx مدیر مالی`",
+                )
+                return
+            rubika_id, title = parts[0].strip(), parts[1].strip()
+            if not re.fullmatch(r"u0[A-Za-z0-9]{10,80}", rubika_id):
+                await self.send(event["chat_id"], "❌ شناسه روبیکا معتبر نیست (فرمت u0...).")
+                return
+            await self.db.pool.execute(
+                """INSERT INTO admins(rubika_id,title,role,active)
+                   VALUES($1,$2,'admin',true)
+                   ON CONFLICT(rubika_id) DO UPDATE
+                   SET title=$2,role='admin',active=true""",
+                rubika_id,
+                title,
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(
+                event["chat_id"],
+                f"✅ مدیر {title} با شناسه {rubika_id} اضافه شد.",
+                menu=admin_menu(),
+            )
+        elif state == "admin_broadcast":
+            if not await self.db.is_admin(
+                event["sender_id"], self.config.admin_id
+            ):
+                await self.db.set_session(event["sender_id"])
+                await self.send(
+                    event["chat_id"], "⛔️ دسترسی مدیر ندارید."
+                )
+                return
+            text = event["text"].strip()
+            if not text:
+                await self.send(
+                    event["chat_id"],
+                    "پیام خالی است. متن پیام همگانی را بنویس:",
+                )
+                return
+            await self.db.set_session(event["sender_id"])
+            users = await self.db.pool.fetch(
+                "SELECT chat_id FROM users WHERE NOT blocked"
+            )
+            sent = 0
+            for row in users:
+                try:
+                    await self.api.send_message(row["chat_id"], text[:4000])
+                    sent += 1
+                except Exception:
+                    log.exception("broadcast failed")
+            await self.send(
+                event["chat_id"],
+                f"📣 پیام همگانی ارسال شد.\n"
+                f"کاربران فعال: {len(users):,}\nارسال شد: {sent:,}",
+                menu=admin_menu(),
+            )
 
     async def admin(self, event, action):
         chat = event["chat_id"]
@@ -1371,23 +1436,33 @@ class Router:
                     )
         elif action == "admin_users":
             rows = await self.db.pool.fetch(
-                "SELECT id,rubika_id,balance,blocked FROM users ORDER BY id LIMIT 50"
+                "SELECT id,rubika_id,balance,blocked FROM users ORDER BY id LIMIT 20"
             )
+            if not rows:
+                await self.send(chat, "کاربری وجود ندارد.")
+                return
             await self.send(
                 chat,
                 "👥 کاربران\n"
-                f"تعداد کل: {len(rows)}\n"
-                + (
-                    "\n".join(
-                        f"{r['id']} | {r['rubika_id']} | {r['balance']:,} ت"
-                        + (" 🚫" if r["blocked"] else "")
-                        for r in rows
-                    )
-                    if rows
-                    else "کاربری وجود ندارد."
+                f"نمایش {len(rows)} کاربر از اول لیست (کل: "
+                f"{await self.db.pool.fetchval('SELECT count(*) FROM users')})\n\n"
+                + "\n".join(
+                    f"{r['id']} | {r['rubika_id']} | {r['balance']:,} ت"
+                    + (" 🚫" if r["blocked"] else "")
+                    for r in rows
                 )
-                + "\n\nبرای مشاهده دارای موجودی: /users_balance"
-                "\nبرای جستجو: /user ID\nبرای بن/آنبن: /block ID یا /unblock ID",
+                + "\n\nبرای بن/آنبن روی دکمه‌ها بزن:",
+                buttons=inline(
+                    [
+                        [
+                            (
+                                f"admin_block:{r['id']}",
+                                ("🚫 بن " if not r["blocked"] else "✅ آنبن ") + str(r["id"]),
+                            )
+                        ]
+                        for r in rows
+                    ]
+                ),
             )
         elif action == "admin_support":
             rows = await self.db.pool.fetch(
@@ -1434,15 +1509,23 @@ class Router:
             )
             if len(lines) == 4:
                 lines.append("• مدیر دیگری فعال نیست.")
-            lines.extend(
-                [
-                    "",
-                    "افزودن: /admin_add RUBIKA_ID TITLE",
-                    "حذف: /admin_delete RUBIKA_ID",
-                    "حذف همه مدیران فرعی: /admin_clear",
-                ]
-            )
-            await self.send(chat, "\n".join(lines))
+            # دکمه‌های تعاملی برای هر مدیر + افزودن/پاک‌سازی
+            buttons = []
+            for row in active_rows:
+                if row["rubika_id"] == self.config.admin_id:
+                    continue
+                buttons.append(
+                    [
+                        (
+                            f"admin_remove:{row['rubika_id']}",
+                            f"❌ حذف {row['title'] or row['rubika_id'][:8]}",
+                        )
+                    ]
+                )
+            buttons.append([("admin_add_admin", "➕ افزودن مدیر با شناسه")])
+            buttons.append([("admin_clear_all", "🗑 حذف همه مدیران فرعی")])
+            buttons.append([("home", "🏠 بازگشت")])
+            await self.send(chat, "\n".join(lines), buttons=inline(buttons))
         elif action == "admin_fx":
             rate = await usd_toman_rate(
                 await self.db.setting("usd_toman_rate", "")
@@ -1624,8 +1707,91 @@ class Router:
                 + "\n\n"
                 + self.admin_help(action),
             )
-        elif action in {"admin_search", "admin_broadcast"}:
+        elif action == "admin_search":
             await self.send(chat, self.admin_help(action))
+        elif action == "admin_broadcast":
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_broadcast",
+                {},
+            )
+            await self.send(
+                chat,
+                "📣 *پیام همگانی*\n"
+                "پیام موردنظر را بنویس. برای همه کاربران فعال ارسال می‌شود.\n"
+                "برای انصراف، دکمه زیر را بزن:",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
+        elif action == "admin_cancel_broadcast":
+            await self.db.set_session(event["sender_id"])
+            await self.send(chat, "✖️ پیام همگانی لغو شد.", menu=admin_menu())
+        elif action.startswith("admin_block:"):
+            user_arg = action.removeprefix("admin_block:")
+            if not user_arg.isdigit():
+                await self.send(chat, "❌ شناسه کاربر نامعتبر است.")
+                return
+            user_id = int(user_arg)
+            current = await self.db.pool.fetchrow(
+                "SELECT blocked FROM users WHERE id=$1", user_id
+            )
+            if not current:
+                await self.send(chat, "کاربر پیدا نشد.")
+                return
+            new_state = not current["blocked"]
+            await self.db.pool.execute(
+                "UPDATE users SET blocked=$1 WHERE id=$2", new_state, user_id
+            )
+            await self.db.audit(
+                event["sender_id"],
+                "block" if new_state else "unblock",
+                details=str(user_id),
+            )
+            await self.send(
+                chat,
+                f"✅ کاربر {user_id} {'بن شد 🚫' if new_state else 'آنبن شد ✅'}",
+            )
+            # بازگشت به لیست کاربران
+            await self.admin(event, "admin_users")
+        elif action == "admin_add_admin":
+            if event["sender_id"] != self.config.admin_id:
+                await self.send(chat, "⛔️ فقط مالک اصلی می‌تواند مدیر اضافه کند.")
+                return
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_add_admin",
+                {},
+            )
+            await self.send(
+                chat,
+                "➕ شناسه روبیکای مدیر جدید را بفرست (فرمت `u0...`):\n"
+                "سپس یک عنوان برای او بنویس.",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
+        elif action.startswith("admin_remove:"):
+            if event["sender_id"] != self.config.admin_id:
+                await self.send(chat, "⛔️ فقط مالک اصلی می‌تواند مدیر حذف کند.")
+                return
+            target = action.removeprefix("admin_remove:")
+            if target == self.config.admin_id:
+                await self.send(chat, "❌ مدیر اصلی قابل حذف نیست.")
+                return
+            await self.db.pool.execute(
+                "UPDATE admins SET active=false WHERE rubika_id=$1", target
+            )
+            await self.db.audit(event["sender_id"], "admin_delete", details=target)
+            await self.send(chat, f"✅ مدیر {target} حذف شد.")
+            await self.admin(event, "admin_admins")
+        elif action == "admin_clear_all":
+            if event["sender_id"] != self.config.admin_id:
+                await self.send(chat, "⛔️ فقط مالک اصلی می‌تواند مدیران را حذف کند.")
+                return
+            await self.db.pool.execute(
+                "UPDATE admins SET active=false WHERE rubika_id<>$1",
+                self.config.admin_id,
+            )
+            await self.db.audit(event["sender_id"], "admin_clear", details="all")
+            await self.send(chat, "🗑 همه مدیران فرعی حذف شدند.")
+            await self.admin(event, "admin_admins")
         else:
             await self.send(chat, self.admin_help(action))
 
