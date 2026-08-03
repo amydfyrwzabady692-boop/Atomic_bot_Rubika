@@ -985,7 +985,11 @@ class Database:
         from supplier import compute_gem_sale_price
 
         updated = 0
-        # بارگذاری همه بسته‌های gem فعال یک‌بار و تطبیق نرم (case-insensitive)
+        matched = 0
+        # بارگذاری همه بسته‌های gem فعال یک‌بار و تطبیق نرم (case/space-insensitive)
+        def _key(value):
+            return " ".join(str(value or "").casefold().split())
+
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 products = await conn.fetch(
@@ -994,14 +998,15 @@ class Database:
                 )
                 product_by_sku = {}
                 for p in products:
-                    key = (p["supplier_sku"] or "").strip().casefold()
+                    key = _key(p["supplier_sku"])
                     product_by_sku.setdefault(key, []).append(p)
                 for item in items:
-                    sku = item["name"].strip().casefold()
+                    sku = _key(item["name"])
                     cost_usd = item["cost_usd"]
                     rows = product_by_sku.get(sku) or []
                     if not rows:
                         continue
+                    matched += 1
                     new_price = await compute_gem_sale_price(
                         cost_usd, rate_value, profit_percent
                     )
@@ -1032,6 +1037,12 @@ class Database:
                        ON CONFLICT(key) DO UPDATE
                        SET value=EXCLUDED.value,updated_at=now()""",
                 )
+        if matched == 0:
+            import logging
+
+            logging.getLogger("atomic-rubika").warning(
+                "Gem price sync: zero SKUs matched the G2Bulk catalogue"
+            )
         return updated
 
     async def setting_timestamp(self, key: str):
