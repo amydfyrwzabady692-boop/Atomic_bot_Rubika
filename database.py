@@ -408,8 +408,11 @@ class Database:
                         "SELECT id FROM users WHERE id=$1 FOR UPDATE",
                         user_id,
                     )
+                    # If there's a live gateway payment that hasn't
+                    # expired yet, let the user know — but if they're
+                    # retrying, auto-cancel it so they can proceed.
                     protected_wallet_payment = await conn.fetchrow(
-                        """SELECT p.provider,p.authority,
+                        """SELECT p.id,p.provider,p.authority,
                                   EXISTS(
                                     SELECT 1 FROM receipts r
                                     WHERE r.payment_id=p.id AND r.status='pending'
@@ -428,9 +431,31 @@ class Database:
                         user_id,
                     )
                     if protected_wallet_payment:
-                        raise ValueError(
-                            "یک شارژ کیف پول فعال یا رسید در انتظار داری؛ "
-                            "ابتدا نتیجه همان پرداخت مشخص شود."
+                        if protected_wallet_payment["receipt_pending"]:
+                            raise ValueError(
+                                "رسید این سفارش در انتظار بررسی است و "
+                                "روش پرداخت قابل تغییر نیست."
+                            )
+                        # Auto-cancel the stale gateway so the user can
+                        # retry with a fresh link.
+                        await conn.execute(
+                            """UPDATE payments SET status='cancelled'
+                               WHERE id=$1""",
+                            protected_wallet_payment["id"],
+                        )
+                        await conn.execute(
+                            """INSERT INTO wallet_ledger(
+                                 user_id,amount,entry_type,reference
+                               ) VALUES($1,$2,'gateway_cancel',$3)
+                               ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                            user_id,
+                            protected_wallet_payment.get("amount") or 0,
+                            f"auto-cancel-wallet:{protected_wallet_payment['id']}",
+                        )
+                        await conn.execute(
+                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                            protected_wallet_payment.get("amount") or 0,
+                            user_id,
                         )
                     await conn.execute(
                         """UPDATE payments SET status='cancelled'
