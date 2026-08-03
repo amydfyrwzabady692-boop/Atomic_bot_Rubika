@@ -437,26 +437,31 @@ class Database:
                                 "روش پرداخت قابل تغییر نیست."
                             )
                         # Auto-cancel the stale gateway so the user can
-                        # retry with a fresh link.
+                        # retry with a fresh link.  Refund the amount
+                        # only when it is a real positive value.
+                        refund_amount = int(
+                            protected_wallet_payment.get("amount") or 0
+                        )
                         await conn.execute(
                             """UPDATE payments SET status='cancelled'
                                WHERE id=$1""",
                             protected_wallet_payment["id"],
                         )
-                        await conn.execute(
-                            """INSERT INTO wallet_ledger(
-                                 user_id,amount,entry_type,reference
-                               ) VALUES($1,$2,'gateway_cancel',$3)
-                               ON CONFLICT(reference) DO NOTHING RETURNING id""",
-                            user_id,
-                            protected_wallet_payment.get("amount") or 0,
-                            f"auto-cancel-wallet:{protected_wallet_payment['id']}",
-                        )
-                        await conn.execute(
-                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
-                            protected_wallet_payment.get("amount") or 0,
-                            user_id,
-                        )
+                        if refund_amount > 0:
+                            await conn.execute(
+                                """INSERT INTO wallet_ledger(
+                                     user_id,amount,entry_type,reference
+                                   ) VALUES($1,$2,'gateway_cancel',$3)
+                                   ON CONFLICT(reference) DO NOTHING""",
+                                user_id,
+                                refund_amount,
+                                f"auto-cancel-wallet:{protected_wallet_payment['id']}",
+                            )
+                            await conn.execute(
+                                "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                                refund_amount,
+                                user_id,
+                            )
                     await conn.execute(
                         """UPDATE payments SET status='cancelled'
                            WHERE user_id=$1 AND purpose='wallet'
