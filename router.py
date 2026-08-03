@@ -72,6 +72,24 @@ class Router:
             await self.send(event["chat_id"], "🚫 حساب شما مسدود است.")
             return
         action = event["button_id"] or event["text"].strip()
+        # برخی کلاینت‌های روبیکا برای دکمه‌های chat_keypad فقط متن دکمه را
+        # می‌فرستند نه button_id را؛ متن دکمه‌های منوی ادمین را به action درست تبدیل کن.
+        _admin_label_map = {
+            "📊 آمار کلی": "admin_stats",
+            "💵 نرخ و سود": "admin_fx",
+            "📦 مدیریت محصولات": "admin_products",
+            "🗂 دسته‌بندی": "admin_categories",
+            "💳 بخش مالی": "admin_finance",
+            "🧾 رسیدها": "admin_receipts",
+            "👥 کاربران": "admin_users",
+            "🔎 جستجو": "admin_search",
+            "🎧 پشتیبانی": "admin_support",
+            "📣 ارسال پیام": "admin_broadcast",
+            "🎁 کدها": "admin_codes",
+            "⚙️ تنظیمات": "admin_settings",
+            "👮 مدیریت مدیران": "admin_admins",
+        }
+        action = _admin_label_map.get(action, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
             await self.db.set_session(event["sender_id"])
             await self.start(event, user)
@@ -1353,18 +1371,23 @@ class Router:
                     )
         elif action == "admin_users":
             rows = await self.db.pool.fetch(
-                "SELECT id,rubika_id,balance FROM users WHERE balance>0 ORDER BY balance DESC LIMIT 30"
+                "SELECT id,rubika_id,balance,blocked FROM users ORDER BY id LIMIT 50"
             )
             await self.send(
                 chat,
-                "👥 کاربران دارای موجودی\n"
+                "👥 کاربران\n"
+                f"تعداد کل: {len(rows)}\n"
                 + (
-                    "\n".join(f"{r['id']} | {r['rubika_id']} | {r['balance']:,}" for r in rows)
+                    "\n".join(
+                        f"{r['id']} | {r['rubika_id']} | {r['balance']:,} ت"
+                        + (" 🚫" if r["blocked"] else "")
+                        for r in rows
+                    )
                     if rows
-                    else "موردی نیست."
+                    else "کاربری وجود ندارد."
                 )
-                + "\n\n/users_balance\n/users_referral\n/users_card\n"
-                "/user ID\n/block DB_ID\n/unblock DB_ID",
+                + "\n\nبرای مشاهده دارای موجودی: /users_balance"
+                "\nبرای جستجو: /user ID\nبرای بن/آنبن: /block ID یا /unblock ID",
             )
         elif action == "admin_support":
             rows = await self.db.pool.fetch(
