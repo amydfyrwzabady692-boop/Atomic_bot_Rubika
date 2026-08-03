@@ -1704,7 +1704,37 @@ class Router:
                     "قیمت واقعی بسته‌ها:\n" + "\n".join(product_lines)
                     if product_lines
                     else "برای نمایش هزینه واقعی، cost_usd محصولات را تنظیم کن."
+                )
+                + "\n\nبروزرسانی خودکار قیمت جم هر ۲۴ ساعت انجام می‌شود.",
+                buttons=inline(
+                    [
+                        [
+                            (
+                                "admin_sync_prices",
+                                "🔄 بروزرسانی فوری قیمت جم (نرخ لحظه‌ای)",
+                            )
+                        ],
+                        [("admin_finance", "💳 تنظیمات مالی")],
+                    ]
                 ),
+            )
+        elif action == "admin_sync_prices":
+            await self.send(chat, "⏳ در حال دریافت نرخ لحظه‌ای دلار و کاتالوگ G2Bulk…")
+            try:
+                result = await self.run_gem_price_sync_router()
+            except Exception as exc:
+                log.exception("Manual price sync failed")
+                await self.send(chat, f"❌ خطا در بروزرسانی: {exc}")
+                return
+            if not result.get("ok"):
+                await self.send(chat, f"❌ بروزرسانی انجام نشد:\n{result.get('error')}")
+                return
+            await self.send(
+                chat,
+                f"✅ بروزرسانی قیمت جم انجام شد.\n"
+                f"تعداد به‌روزرسانی‌شده: {result['updated']}\n"
+                f"نرخ دلار لحظه‌ای: {result['rate']:,} تومان ({result['source']})",
+                menu=admin_menu(),
             )
         elif action == "admin_products":
             rows = await self.db.pool.fetch(
@@ -2641,6 +2671,28 @@ class Router:
                 chat,
                 "❌ عملیات انجام نشد؛ ورودی یا وضعیت فعلی را بررسی کن.",
             )
+
+    async def run_gem_price_sync_router(self):
+        """بروزرسانی دستی قیمت جم با نرخ لحظه‌ای دلار + کاتالوگ G2Bulk."""
+        rate = await usd_toman_rate(
+            await self.db.setting("usd_toman_rate", "")
+        )
+        if not rate.get("ok"):
+            return {"ok": False, "error": rate.get("error")}
+        catalogue = await self.g2.catalogue()
+        if not catalogue.get("ok"):
+            return {"ok": False, "error": catalogue.get("error")}
+        updated = await self.db.sync_gem_prices_from_catalogue(
+            items=catalogue["items"],
+            rate_value=rate["rate"],
+            profit_percent=7,
+        )
+        return {
+            "ok": True,
+            "updated": updated,
+            "rate": rate["rate"],
+            "source": rate["source"],
+        }
 
     async def review_join(self, admin_id, user_id, approved):
         status = "approved" if approved else "rejected"
