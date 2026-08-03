@@ -132,7 +132,7 @@ class Database:
                                 WHERE p.order_id=o.id
                                   AND p.provider='gateway'
                                   AND p.authority IS NOT NULL
-                                  AND p.status IN ('pending','cancelled','expired')
+                                  AND p.status='pending' AND p.expires_at>now()
                               ) gateway_issued,
                               EXISTS(
                                 SELECT 1 FROM payments p
@@ -351,7 +351,7 @@ class Database:
                     ):
                         raise ValueError("سفارش قابل پرداخت نیست.")
                     protected_payment = await conn.fetchrow(
-                        """SELECT p.provider,p.authority,
+                        """SELECT p.id,p.provider,p.authority,
                                   EXISTS(
                                     SELECT 1 FROM receipts r
                                     WHERE r.payment_id=p.id AND r.status='pending'
@@ -360,7 +360,7 @@ class Database:
                            WHERE p.order_id=$1
                              AND (
                                (p.provider='gateway' AND p.authority IS NOT NULL
-                                AND p.status IN ('pending','cancelled','expired'))
+                                AND p.status='pending' AND p.expires_at>now())
                                OR EXISTS(
                                  SELECT 1 FROM receipts r
                                  WHERE r.payment_id=p.id AND r.status='pending'
@@ -376,9 +376,19 @@ class Database:
                                 "تا اعلام نتیجه روش پرداخت را عوض نکن."
                             )
                         raise ValueError(
-                            "برای این سفارش قبلاً لینک درگاه صادر شده است؛ "
-                            "همان لینک را بررسی کن."
+                            "برای این سفارش لینک درگاه فعالی وجود دارد؛ "
+                            "همان لینک را بررسی کن یا از «تغییر امن روش پرداخت» استفاده کن."
                         )
+                    # لینک درگاهِ منقضی/لغوشده نباید سفارش را قفل کند. آن را به
+                    # کیف پول جدا می‌کنیم تا اگر بعداً پرداخت شد، مبلغ به کیف پول
+                    # برگردد و تحویلِ دوم برای سفارش رخ ندهد.
+                    await conn.execute(
+                        """UPDATE payments SET purpose='wallet',order_id=NULL
+                           WHERE order_id=$1 AND provider='gateway'
+                             AND authority IS NOT NULL
+                             AND status IN ('expired','cancelled')""",
+                        order_id,
+                    )
                     amount = int(order["payable_amount"])
                     await conn.execute(
                         """UPDATE receipts SET status='rejected',reviewed_at=now()
@@ -462,7 +472,7 @@ class Database:
                WHERE p.order_id=$1 AND o.user_id=$2
                  AND o.status='pending' AND o.inventory_reserved
                  AND p.provider='gateway' AND p.authority IS NOT NULL
-                 AND p.status IN ('pending','cancelled','expired')
+                 AND p.status='pending' AND p.expires_at>now()
                ORDER BY p.id DESC LIMIT 1""",
             order_id,
             user_id,

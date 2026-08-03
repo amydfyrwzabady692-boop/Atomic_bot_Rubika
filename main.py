@@ -575,7 +575,12 @@ class Application:
                 row["authority"],
             )
             if verify_status == "not_paid":
-                if int(row["verify_attempts"] or 0) + 1 >= 3:
+                attempts = int(row["verify_attempts"] or 0) + 1
+                # لینک درگاهِ منقضی که در درگاه پرداخت نشده، نباید سفارش را
+                # قفل کند؛ پس از چند بار اطمینان، همان را rejected کن تا آزاد شود.
+                if attempts >= 3 or (
+                    attempts >= 2 and row["status"] == "expired"
+                ):
                     await self.db.pool.execute(
                         """UPDATE payments SET status='rejected'
                            WHERE id=$1 AND status IN ('pending','expired','cancelled')""",

@@ -383,6 +383,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('verify_status == "not_paid"', worker_source)
         self.assertIn("verify_attempts", worker_source)
 
+    def test_expired_gateway_link_does_not_lock_a_fresh_order(self):
+        # A gateway payment that is expired/cancelled (and never paid) must not
+        # block creating a fresh payment for the same order, nor be offered as
+        # an active link. Only live pending-with-valid-expiry links count.
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        self.assertIn("AND p.status='pending' AND p.expires_at>now()", database_source)
+        # The stale link must be detached to wallet so a late payment credits
+        # the wallet instead of double-delivering the order.
+        self.assertIn("purpose='wallet',order_id=NULL", database_source)
+        self.assertIn("status IN ('expired','cancelled')", database_source)
+        # Reconcile releases stale unpaid links sooner instead of holding the
+        # order for up to 24h.
+        worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('and row["status"] == "expired"', worker_source)
+
     def test_pending_receipt_is_not_expired_before_admin_review(self):
         database_source = (ROOT / "database.py").read_text(encoding="utf-8")
         worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
