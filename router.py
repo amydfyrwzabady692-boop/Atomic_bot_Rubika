@@ -2462,6 +2462,17 @@ class Router:
                 await self.review_receipt(admin_id, int(receipt_arg), name.endswith("_ok"))
             elif name in {"/join_ok", "/join_no"}:
                 await self.review_join(admin_id, int(args), name.endswith("_ok"))
+            elif name == "/sync_prices":
+                await self.send(chat, "⏳ در حال بروزرسانی قیمت جم با نرخ لحظه‌ای…")
+                result = await self.run_gem_price_sync_router()
+                if not result.get("ok"):
+                    raise ValueError(result.get("error") or "بروزرسانی ناموفق بود.")
+                await self.send(
+                    chat,
+                    f"✅ بروزرسانی قیمت جم انجام شد.\n"
+                    f"تعداد به‌روزرسانی‌شده: {result['updated']}\n"
+                    f"نرخ دلار لحظه‌ای: {result['rate']:,} تومان ({result['source']})",
+                )
             elif name == "/setting":
                 key, value = args.split(" ", 1)
                 allowed = {

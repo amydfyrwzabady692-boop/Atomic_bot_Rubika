@@ -985,16 +985,21 @@ class Database:
         from supplier import compute_gem_sale_price
 
         updated = 0
+        # بارگذاری همه بسته‌های gem فعال یک‌بار و تطبیق نرم (case-insensitive)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                products = await conn.fetch(
+                    """SELECT id,supplier_sku,price,supplier_cost_usd
+                       FROM products WHERE kind='gem' AND active"""
+                )
+                product_by_sku = {}
+                for p in products:
+                    key = (p["supplier_sku"] or "").strip().casefold()
+                    product_by_sku.setdefault(key, []).append(p)
                 for item in items:
-                    sku = item["name"].strip()
+                    sku = item["name"].strip().casefold()
                     cost_usd = item["cost_usd"]
-                    rows = await conn.fetch(
-                        """SELECT id,price,supplier_cost_usd FROM products
-                           WHERE kind='gem' AND supplier_sku=$1 AND active""",
-                        sku,
-                    )
+                    rows = product_by_sku.get(sku) or []
                     if not rows:
                         continue
                     new_price = await compute_gem_sale_price(

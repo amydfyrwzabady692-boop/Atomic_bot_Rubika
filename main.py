@@ -53,6 +53,8 @@ class Application:
                 asyncio.create_task(self.price_sync_loop()),
             ]
         )
+        # بروزرسانی فوری قیمت جم در اولین استارت، تا قیمت‌ها همیشه لحظه‌ای باشند
+        self.tasks.append(asyncio.create_task(self.run_initial_price_sync()))
 
     async def close(self):
         for task in self.tasks:
@@ -578,6 +580,13 @@ class Application:
             except Exception:
                 log.exception("Price sync failed")
                 await asyncio.sleep(5 * 60)
+
+    async def run_initial_price_sync(self):
+        """اجرای فوری بروزرسانی قیمت در اولین استارت ربات (بدون انتظار ۲۴ ساعت)."""
+        try:
+            await self.run_gem_price_sync()
+        except Exception:
+            log.exception("Initial price sync failed")
 
     async def run_gem_price_sync(self):
         """اجرای یک‌بار بروزرسانی قیمت؛ خروجی خلاصه برای لاگ."""
