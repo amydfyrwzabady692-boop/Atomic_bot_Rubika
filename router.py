@@ -97,6 +97,7 @@ class Router:
             "🛍 مدیریت فروشگاه": "admin_shop",
             "📦 سفارش‌ها": "admin_orders",
             "📣 پیام همگانی": "admin_broadcast",
+            "🔄 بروزرسانی قیمت جم": "admin_sync_prices",
         }
         action = _admin_label_map.get(action, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
