@@ -521,12 +521,16 @@ class WorkflowTests(unittest.TestCase):
                 "gateway",
             )
         )
-        message = api.messages[-1]
-        self.assertNotIn("VPN", message[1])
-        button = message[2]["inline_keypad"]["rows"][0]["buttons"][0]
+        # First message carries the Link button; the URL is also sent as a
+        # standalone tap-able message so Rubika can open it even if the Link
+        # button itself is not clickable in some clients.
+        first, *rest = api.messages
+        self.assertNotIn("VPN", first[1])
+        button = first[2]["inline_keypad"]["rows"][0]["buttons"][0]
         self.assertEqual(button["type"], "Link")
         self.assertEqual(button["id"], "https://payment.example/A0001")
-        self.assertIn("https://payment.example/A0001", message[1])
+        # The URL must be delivered on its own line as a clickable link.
+        self.assertTrue(any(msg[1] == "https://payment.example/A0001" for msg in rest))
 
     def test_card_number_is_sent_as_an_exact_standalone_copy_message(self):
         router, api = self.make_router(PaymentDatabase("card"))

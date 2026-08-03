@@ -614,11 +614,25 @@ class Router:
         text = (
             f"✅ {label}\n"
             f"مبلغ: {int(payment['amount']):,} تومان\n\n"
-            "دکمه زیر را بزن یا لینک را کپی کن:\n"
-            f"{url}"
+            "لینک پرداخت (روی آن بزن تا باز شود):"
         )
         try:
             await self.send(event["chat_id"], text, buttons=inline(rows))
+            # لینک را به‌صورت یک پیام جدا می‌فرستیم تا روبیکا آن را به‌عنوان
+            # لینکِ قابل‌کلیک (تپ‌شدنی) تشخیص دهد؛ دکمه Link در برخی نسخه‌های
+            # روبیکا باز نمی‌شود.
+            await self.send(event["chat_id"], url)
+            if order_id is not None:
+                await self.send(
+                    event["chat_id"],
+                    "اگر لینک باز نشد، روی لینک بالا بزن یا کپی کن.",
+                    buttons=inline(
+                        [
+                            [(f"pay_reopen:{order_id}", "🔁 نمایش دوباره لینک")],
+                            [(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")],
+                        ]
+                    ),
+                )
         except RubikaAPIError:
             log.exception("Rubika rejected gateway Link keypad; sending plain URL")
             fallback = []
@@ -626,7 +640,7 @@ class Router:
                 fallback = [[(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")]]
             await self.send(
                 event["chat_id"],
-                text,
+                text + f"\n{url}",
                 buttons=inline(fallback) if fallback else None,
             )
 
