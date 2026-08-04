@@ -13,7 +13,7 @@ from payment_safety import (
 )
 from payments import Zarinpal
 from rubika_api import RubikaAPI, RubikaAPIError
-from supplier import G2Bulk, usd_toman_rate
+from supplier import G2Bulk, can_fulfill, usd_toman_rate
 
 log = logging.getLogger(__name__)
 
@@ -393,6 +393,40 @@ class Router:
                 user_id,
             )
         )
+
+    async def _delivery_preflight(self, order_id):
+        """پیش از دریافت پول، موجودی سرویس تحویل (G2Bulk) را برای قلم‌های سفارش بررسی می‌کند.
+
+        اگر موجودی کافی نباشد، کاربر نباید به مرحله پرداخت برود تا پولش کسر نشود.
+        خروجی: (available, error_message, cost_usd, balance_usd)
+        """
+        rows = await self.db.pool.fetch(
+            """SELECT p.supplier_sku,p.supplier_cost_usd,p.amount
+               FROM order_items i
+               JOIN products p ON p.id=i.product_id
+               WHERE i.order_id=$1""",
+            order_id,
+        )
+        if not rows:
+            return False, "قلمی برای سفارش پیدا نشد.", None, None
+        force = True
+        for row in rows:
+            if str(row["supplier_sku"] or "").strip().isdigit():
+                amount = int(row["amount"] or row["supplier_sku"])
+                catalogue = str(row["supplier_sku"] or amount)
+            elif str(row["supplier_sku"] or "").strip():
+                # نام کاتالوگ مانند "Level Up Package - Level 6" یا "Weekly Membership"
+                amount = int(row["amount"] or 0)
+                catalogue = str(row["supplier_sku"])
+            else:
+                continue
+            available, cost_usd, balance, error = await can_fulfill(
+                amount, catalogue, force=force
+            )
+            if not available:
+                return False, error or "موجودی سرویس تأمین کافی نیست.", cost_usd, balance
+            force = False
+        return True, None, None, None
 
     async def start(self, event, user):
         channels = await self.db.pool.fetch(
@@ -775,6 +809,19 @@ class Router:
             if not number:
                 await self.send(event["chat_id"], "کارت‌به‌کارت فعلاً فعال نیست.")
                 return
+        # بررسی موجودی سرویس تحویل (G2Bulk) پیش از دریافت پول — تا کاربر وقتی
+        # موجودی تأمین‌کننده کافی نیست اصلاً به پرداخت نرود و پولش کسر نشود.
+        available, preflight_error, _cost, _balance = await self._delivery_preflight(
+            order_id
+        )
+        if not available:
+            await self.send(
+                event["chat_id"],
+                "❌ موجودی سرویس تحویل برای این بسته کافی نیست؛ "
+                "برای جلوگیری از کسر پول، پرداخت باز نشد.\n"
+                f"({preflight_error or ''})",
+            )
+            return
         try:
             payment = await self.db.create_payment(
                 user["id"],

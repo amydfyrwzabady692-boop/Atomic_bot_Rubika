@@ -506,10 +506,13 @@ class Application:
                                WHERE id=$1 AND status='paid'""",
                             row["id"],
                         )
+                        # برگرداندن پول به کیف پول کاربر برای سفارش‌های failed
+                        await self._refund_failed_order(row["id"])
                         await self.api.send_message(
                             self.config.admin_chat_id,
                             f"⚠️ تأمین‌کننده سفارش #{row['id']} را قطعی رد کرد:\n"
-                            f"{result.get('error')}",
+                            f"{result.get('error')}\n"
+                            f"مبلغ به کیف پول کاربر برگردانده شد.",
                         )
             except asyncio.CancelledError:
                 raise
@@ -690,8 +693,64 @@ class Application:
                 await self.api.send_message(
                     user["chat_id"],
                     f"✅ پرداخت {payment['amount']:,} تومان پس از بررسی مجدد ثبت شد.\n"
-                    f"کد پیگیری: {ref_id}",
+                    f"کد پیگیری: {ref_id}\n"
+                    f"سفارش: #{payment.get('order_id') or '—'} | "
+                    f"مبلغ: {payment.get('amount') or payment.get('amount', 0):,} تومان",
                 )
+
+
+    async def _refund_failed_order(self, order_id: int):
+        """برگرداندن مبلغ سفارش رد شده به کیف پول کاربر."""
+        try:
+            async with self.db.pool.acquire() as conn:
+                async with conn.transaction():
+                    # وضعیت سفارش را بگیر
+                    order = await conn.fetchrow(
+                        """SELECT o.id, o.user_id, o.total_amount, o.discount_amount,
+                              o.wallet_paid, o.payable_amount
+                           FROM orders o WHERE o.id=$1""",
+                        order_id,
+                    )
+                    if not order:
+                        return
+                    # محاسبه مبلغ قابل بازگشت: کل پرداخت شده (wallet_paid + درگاه)
+                    total_paid = int(order["wallet_paid"] or 0)
+                    # اگر درگاه هم پرداخت شده، آن را هم پیدا کن
+                    gateway_payment = await conn.fetchrow(
+                        """SELECT amount FROM payments
+                           WHERE order_id=$1 AND provider='gateway'
+                             AND status='verified'""",
+                        order_id,
+                    )
+                    if gateway_payment:
+                        total_paid += int(gateway_payment["amount"])
+                    if total_paid <= 0:
+                        return
+                    # مبلغ را به کیف پول برگردان
+                    reference = f"delivery_failed_refund:{order_id}"
+                    inserted = await conn.fetchval(
+                        """INSERT INTO wallet_ledger(user_id,amount,entry_type,reference)
+                           VALUES($1,$2,'delivery_refund',$3)
+                           ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                        order["user_id"],
+                        total_paid,
+                        reference,
+                    )
+                    if inserted:
+                        await conn.execute(
+                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                            total_paid,
+                            order["user_id"],
+                        )
+                        await self.api.send_message(
+                            await conn.fetchval(
+                                "SELECT chat_id FROM users WHERE id=$1", order["user_id"]
+                            ),
+                            f"⚠️ سفارش #{order_id} به دلیل عدم موجودی در تأمین‌کننده رد شد.\n"
+                            f"💰 مبلغ {total_paid:,} تومان به کیف پولت برگشت.",
+                        )
+        except Exception as e:
+            log.exception("Failed to refund failed order %s: %s", order_id, e)
 
 
 async def webhook(request):

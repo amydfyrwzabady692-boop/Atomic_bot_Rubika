@@ -1,12 +1,95 @@
+import asyncio
 import os
+import re
+import time
+import threading
 import uuid
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import aiohttp
 
+_inventory_cache = {"at": 0.0, "value": None}
+_inventory_refresh_lock = threading.Lock()
+_INVENTORY_CACHE_SECONDS = 5 * 60
+_FORCED_REFRESH_COALESCE_SECONDS = 30
+
 
 def g2_idempotency_key(order_id: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"atomic-rubika:order:{order_id}"))
+
+
+def get_inventory_snapshot(force=False):
+    """موجودی دلاری و قیمت زنده کاتالوگ بازی را با کش کوتاه برمی‌گرداند.
+
+    این تابع در `supplier.py` برای هماهنگی با بات تلگرام استفاده می‌شود
+    تا قبل از دریافت پول، موجودی G2Bulk بررسی شود.
+    خروجی: {'ok': bool, 'balance': Decimal, 'prices': {amount: cost}, ...}
+    """
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+    try:
+        return _asyncio.run(_fetch_inventory_snapshot(force))
+    finally:
+        loop.close()
+
+
+async def _fetch_inventory_snapshot(force=False):
+    """واقعی‌ترین پیاده‌سازی: از خود کلاینت G2Bulk برای بررسی موجودی استفاده می‌کند."""
+    from supplier import G2Bulk
+
+    g2 = G2Bulk()
+    await g2.start()
+    try:
+        data = await g2._call("GET", "/getMe")
+        if not data.get("success") or data.get("balance") is None:
+            return {
+                "ok": False,
+                "error": data.get("message") or "دریافت موجودی G2Bulk ناموفق بود.",
+            }
+        catalogue = await g2._call("GET", f"/games/{g2.game}/catalogue")
+        if not catalogue.get("success"):
+            return {
+                "ok": False,
+                "error": catalogue.get("message") or "دریافت کاتالوگ G2Bulk ناموفق بود.",
+            }
+        try:
+            balance = Decimal(str(data["balance"]))
+        except (InvalidOperation, TypeError, ValueError):
+            return {"ok": False, "error": "موجودی برگشتی G2Bulk معتبر نیست."}
+
+        prices = {}
+        names = {}
+        prices_by_name = {}
+        for item in catalogue.get("catalogues") or []:
+            name = str(item.get("name") or "").strip()
+            match = re.search(r"\d+", name)
+            try:
+                package_amount = int(match.group()) if match else None
+                cost = Decimal(str(item.get("amount")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if not name or cost <= 0:
+                continue
+            prices_by_name[_normalise_catalogue_name(name)] = cost
+            if package_amount:
+                prices[package_amount] = cost
+                names[package_amount] = name
+        return {
+            "ok": True,
+            "balance": balance,
+            "currency": str(data.get("currency") or "USD"),
+            "prices": prices,
+            "prices_by_name": prices_by_name,
+            "names": names,
+            "username": data.get("username") or "",
+        }
+    finally:
+        await g2.close()
+
+
+def _normalise_catalogue_name(name):
+    return " ".join(str(name or "").strip().casefold().split())
 
 
 async def usd_toman_rate(manual_rate=None):
@@ -59,6 +142,110 @@ class G2Bulk:
         self.key = os.getenv("G2BULK_API_KEY", "").strip()
         self.game = os.getenv("G2BULK_GAME_CODE", "freefire_me").strip()
         self.session: aiohttp.ClientSession | None = None
+        self._inventory_cache: dict = {"at": 0.0, "value": None}
+        self._inventory_lock = threading.Lock()
+
+    async def inventory_snapshot(self, force=False):
+        """موجودی دلاری و قیمت زنده کاتالوگ بازی را با کش کوتاه برمی‌گرداند."""
+        if not self.key:
+            return {"ok": False, "error": "G2BULK_API_KEY تنظیم نشده است."}
+        import time as _time
+
+        now = _time.monotonic()
+        cached = self._inventory_cache.get("value")
+        if cached and now - self._inventory_cache.get("at", 0) < _INVENTORY_CACHE_SECONDS:
+            return cached
+        with self._inventory_lock:
+            now = _time.monotonic()
+            cached = self._inventory_cache.get("value")
+            if cached and (
+                (not force and now - self._inventory_cache.get("at", 0) < _INVENTORY_CACHE_SECONDS)
+                or (force and cached.get("ok")
+                    and now - self._inventory_cache.get("at", 0) < _FORCED_REFRESH_COALESCE_SECONDS)
+            ):
+                return cached
+            data = await self._call("GET", "/getMe")
+            if not data.get("success") or data.get("balance") is None:
+                result = {
+                    "ok": False,
+                    "error": data.get("message") or "دریافت موجودی G2Bulk ناموفق بود.",
+                }
+                self._inventory_cache.update(at=now, value=result)
+                return result
+            catalogue = await self._call("GET", f"/games/{self.game}/catalogue")
+            if not catalogue.get("success"):
+                result = {
+                    "ok": False,
+                    "error": catalogue.get("message") or "دریافت کاتالوگ G2Bulk ناموفق بود.",
+                }
+                self._inventory_cache.update(at=now, value=result)
+                return result
+            try:
+                balance = Decimal(str(data["balance"]))
+            except (InvalidOperation, TypeError, ValueError):
+                result = {"ok": False, "error": "موجودی برگشتی G2Bulk معتبر نیست."}
+                self._inventory_cache.update(at=now, value=result)
+                return result
+            prices = {}
+            names = {}
+            prices_by_name = {}
+            for item in catalogue.get("catalogues") or []:
+                name = str(item.get("name") or "").strip()
+                match = re.search(r"\d+", name)
+                try:
+                    package_amount = int(match.group()) if match else None
+                    cost = Decimal(str(item.get("amount")))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if not name or cost <= 0:
+                    continue
+                prices_by_name[_normalise_catalogue_name(name)] = cost
+                if package_amount:
+                    prices[package_amount] = cost
+                    names[package_amount] = name
+            result = {
+                "ok": True,
+                "balance": balance,
+                "currency": str(data.get("currency") or "USD"),
+                "prices": prices,
+                "prices_by_name": prices_by_name,
+                "names": names,
+                "username": data.get("username") or "",
+            }
+            self._inventory_cache.update(at=now, value=result)
+            return result
+
+    async def can_fulfill(self, amount, catalogue_name="", force=False):
+        """بررسی می‌کند یک بسته با موجودی فعلی حساب API قابل سفارش است."""
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return False, None, None, "مقدار بسته نامعتبر است."
+        snapshot = await self.inventory_snapshot(force=force)
+        if not snapshot.get("ok"):
+            return False, None, None, snapshot.get("error")
+        cost = None
+        if catalogue_name:
+            cost = snapshot.get("prices_by_name", {}).get(
+                _normalise_catalogue_name(catalogue_name)
+            )
+        if cost is None:
+            cost = snapshot.get("prices", {}).get(amount)
+        if cost is None and catalogue_name:
+            match = re.search(r"\d+", str(catalogue_name))
+            if match:
+                cost = snapshot.get("prices", {}).get(int(match.group()))
+        if cost is None:
+            return False, None, snapshot["balance"], (
+                "بسته در کاتالوگ زنده API پیدا نشد."
+            )
+        available = Decimal(str(snapshot["balance"])) >= Decimal(str(cost))
+        if not available:
+            return False, cost, snapshot["balance"], (
+                "موجودی دلاری API برای این بسته کافی نیست. "
+                f"موجودی: ${snapshot['balance']} | هزینه: ${cost}"
+            )
+        return True, cost, snapshot["balance"], None
 
     async def start(self):
         if self.session is None or self.session.closed:
@@ -328,6 +515,38 @@ class G2Bulk:
             amount = int(match.group()) if match else None
             items.append({"name": name, "cost_usd": cost, "amount": amount})
         return {"ok": True, "items": items}
+
+
+# A module-level G2Bulk client used by the inventory convenience functions.
+# It shares a single HTTP session so concurrent preflight checks coalesce.
+_module_g2: G2Bulk | None = None
+
+
+async def async_get_inventory_snapshot(force=False):
+    """Async wrapper around a module-level G2Bulk instance for inventory."""
+    global _module_g2
+    if _module_g2 is None:
+        _module_g2 = G2Bulk()
+    if _module_g2.session is None or _module_g2.session.closed:
+        await _module_g2.start()
+    return await _module_g2.inventory_snapshot(force=force)
+
+
+async def can_fulfill(amount, catalogue_name='', force=False):
+    """Async version of G2Bulk.can_fulfill (module-level convenience).
+
+    خروجی: (available, cost_usd, balance_usd, error)
+    - available: True اگر موجودی کافی باشد
+    - cost_usd: هزینه دلاری بسته
+    - balance_usd: موجودی فعلی حساب G2Bulk
+    - error: پیام خطا در صورت مشکل
+    """
+    global _module_g2
+    if _module_g2 is None:
+        _module_g2 = G2Bulk()
+    if _module_g2.session is None or _module_g2.session.closed:
+        await _module_g2.start()
+    return await _module_g2.can_fulfill(amount, catalogue_name, force=force)
 
 
 async def compute_gem_sale_price(cost_usd, usd_toman_rate_value, profit_percent=7):
