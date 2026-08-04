@@ -242,8 +242,7 @@ class G2Bulk:
         available = Decimal(str(snapshot["balance"])) >= Decimal(str(cost))
         if not available:
             return False, cost, snapshot["balance"], (
-                "موجودی دلاری API برای این بسته کافی نیست. "
-                f"موجودی: ${snapshot['balance']} | هزینه: ${cost}"
+                "موجودی سرویس تأمین برای این بسته کافی نیست."
             )
         return True, cost, snapshot["balance"], None
 
