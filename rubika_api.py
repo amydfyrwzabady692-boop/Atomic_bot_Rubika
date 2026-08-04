@@ -93,6 +93,17 @@ class RubikaAPI:
             {"url": url, "type": endpoint_type},
         )
 
+    async def set_bot_description(self, description: str) -> dict:
+        """به‌روزرسانی توضیحات ربات (که در صفحه معرفی ربات نمایش داده می‌شود).
+
+        از متد updateBotAttributes استفاده می‌شود که در Rubika Bot API برای
+        به‌روزرسانی توضیحات/شروع‌نامه ربات موجود است.
+        """
+        return await self.call(
+            "updateBotAttributes",
+            {"bot_description": str(description)[:2000]},
+        )
+
 
 def normalize_event(payload: dict) -> dict | None:
     """Normalize official receiveUpdate and receiveInlineMessage payloads."""
