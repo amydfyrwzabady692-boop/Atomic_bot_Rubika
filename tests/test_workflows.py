@@ -393,10 +393,50 @@ class WorkflowTests(unittest.TestCase):
         # the wallet instead of double-delivering the order.
         self.assertIn("purpose='wallet',order_id=NULL", database_source)
         self.assertIn("status IN ('expired','cancelled')", database_source)
+        # Retrying wallet charge must cancel a stale gateway link without
+        # crediting the wallet — pending links are not verified payments.
+        self.assertIn("Never credit the wallet here", database_source)
+        self.assertNotIn("auto-cancel-wallet:", database_source)
         # Reconcile releases stale unpaid links sooner instead of holding the
         # order for up to 24h.
         worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn('and row["status"] == "expired"', worker_source)
+        self.assertIn("provider IN ('gateway','card')", worker_source)
+        self.assertIn("inventory_reserved=false", worker_source)
+        self.assertIn("delivery_failed", worker_source)
+        self.assertIn("order_amounts", database_source)
+        self.assertIn("'rejected'", database_source)
+
+    def test_admin_panel_has_internal_guard_and_session_reset(self):
+        router_source = (ROOT / "router.py").read_text(encoding="utf-8")
+        self.assertIn("async def admin(self, event, action):", router_source)
+        self.assertIn("دسترسی مدیر ندارید.", router_source)
+        self.assertIn("admin_product_add_kind", router_source)
+        self.assertIn("product_add_start(event)", router_source)
+        self.assertIn("COALESCE(category,'bot')<>'credential'", router_source)
+
+    def test_late_gateway_payment_credits_wallet_when_order_closed(self):
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        self.assertIn("order_status != \"pending\"", database_source)
+        self.assertIn("purpose='wallet',order_id=NULL", database_source)
+
+    def test_credential_prices_sync_with_daily_gem_price_loop(self):
+        main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        self.assertIn("sync_credential_prices", main_source)
+        self.assertIn("cred_updated", main_source)
+        self.assertIn("weekly_profit", main_source)
+        self.assertIn("credential_weekly_profit_percent", database_source)
+        self.assertIn("'40'", database_source)
+        self.assertIn("compute_gem_sale_price", database_source)
+
+    def test_reconcile_detaches_instead_of_terminal_reject(self):
+        worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("UPDATE payments SET status='rejected'", worker_source)
+        self.assertIn("purpose='wallet',order_id=NULL", worker_source)
+        worker_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("UPDATE payments SET status='rejected'", worker_source)
+        self.assertIn("purpose='wallet',order_id=NULL", worker_source)
 
     def test_pending_receipt_is_not_expired_before_admin_review(self):
         database_source = (ROOT / "database.py").read_text(encoding="utf-8")

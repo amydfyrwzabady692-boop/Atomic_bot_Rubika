@@ -282,7 +282,7 @@ INSERT INTO settings(key,value) VALUES
  ('payments_enabled','1'),
  ('zarinpal_enabled','1'),
  ('zarinpal_merchant_id',''),
- ('gem_profit_percent','7'),
+ ('gem_profit_percent','10'),
  ('card_enabled','1'),
  ('card_number',''),
  ('card_holder',''),
@@ -493,6 +493,7 @@ ALTER TABLE tickets
 
 INSERT INTO settings(key,value) VALUES
   ('credential_support_id',''),
+  ('credential_profit_percent','40'),
   ('credential_weekly_profit_percent','40'),
   ('credential_monthly_profit_percent','40'),
   ('credential_weekly_cost_usd','1.328'),
@@ -526,3 +527,7 @@ END $cred_products$;
 UPDATE fulfillments
 SET status='SUBMIT_UNKNOWN',next_retry_at=NULL,updated_at=now()
 WHERE status='RETRY' AND provider_order_id IS NULL;
+
+-- پیش‌فرض قدیمی سود جم با آیدی ۷٪ بود؛ یک‌بار به ۱۰٪ ارتقا بده (اگر دستی عوض نشده).
+UPDATE settings SET value='10', updated_at=now()
+WHERE key='gem_profit_percent' AND value='7';

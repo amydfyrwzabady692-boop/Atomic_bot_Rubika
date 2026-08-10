@@ -814,19 +814,46 @@ class CredentialHandlers:
         )
 
     async def credential_pricing_hub(self, event):
+        from supplier import compute_gem_sale_price, usd_toman_rate
+
         await self.db.set_session(event["sender_id"])
         cfg = await self.db.get_credential_pricing_config()
-        rate = await self.db.setting("usd_toman_rate", "")
+        manual_rate = await self.db.setting("usd_toman_rate", "")
+        live = await usd_toman_rate(manual_rate)
+        last_sync = await self.db.setting_timestamp("gem_price_last_sync")
         products = await self.db.products("gem_credentials")
+        rate_value = live["rate"] if live.get("ok") else None
+        weekly_preview = monthly_preview = None
+        if rate_value:
+            weekly_preview = await compute_gem_sale_price(
+                cfg["weekly_cost"], rate_value, cfg["weekly_profit"]
+            )
+            monthly_preview = await compute_gem_sale_price(
+                cfg["monthly_cost"], rate_value, cfg["monthly_profit"]
+            )
         lines = [
             "💱 قیمت‌گذاری جم با اطلاعات",
             "━━━━━━━━━━━━━━━",
-            f"نرخ دلار تنظیم‌شده: {rate or '—'}",
-            f"💵 بهای هفتگی: {cfg['weekly_cost']} USD · سود {cfg['weekly_profit']}%",
-            f"💵 بهای ماهانه: {cfg['monthly_cost']} USD · سود {cfg['monthly_profit']}%",
+            "فرمول: بهای دلاری × نرخ دلار × (1 + سود٪) → گرد به هزار تومان",
             "",
-            "محصولات فعال:",
+            f"💵 بهای خالص هفتگی: {cfg['weekly_cost']} USD · سود {cfg['weekly_profit']}٪",
+            f"💵 بهای خالص ماهانه: {cfg['monthly_cost']} USD · سود {cfg['monthly_profit']}٪",
         ]
+        if live.get("ok"):
+            lines.append(
+                f"💱 نرخ لحظه‌ای: {live['rate']:,} تومان ({live['source']})"
+            )
+            if weekly_preview is not None:
+                lines.append(f"📅 قیمت فروش هفتگی (محاسبه): {weekly_preview:,} ت")
+            if monthly_preview is not None:
+                lines.append(f"📆 قیمت فروش ماهانه (محاسبه): {monthly_preview:,} ت")
+        else:
+            lines.append(
+                f"⚠️ نرخ لحظه‌ای در دسترس نیست؛ fallback: {manual_rate or '—'}"
+            )
+        if last_sync:
+            lines.extend(["", f"🕐 آخرین sync: {last_sync.strftime('%Y-%m-%d %H:%M')}"])
+        lines.extend(["", "⏱ هر ۲۴ ساعت خودکار به‌روز می‌شود.", "", "محصولات فعال:"])
         for p in products:
             lines.append(f"• #{p['id']} {p['title']} — {int(p['price']):,} ت")
         if not products:
@@ -836,34 +863,18 @@ class CredentialHandlers:
             "\n".join(lines),
             buttons=inline(
                 [
-                    [("cred_price_sync", "🔄 همگام‌سازی قیمت‌ها")],
-                    [("admin_cred_set_weekly_profit", "📅 سود هفتگی")],
-                    [("admin_cred_set_monthly_profit", "📆 سود ماهانه")],
-                    [("admin_cred_set_weekly_cost", "💵 بهای دلاری هفتگی")],
-                    [("admin_cred_set_monthly_cost", "💵 بهای دلاری ماهانه")],
-                    [("admin_shop", "🔙 فروشگاه")],
+                    [("admin_pricing_sync", "🔄 sync جم با اطلاعات")],
+                    [
+                        ("admin_cred_set_weekly_cost", "💵 $ هفتگی"),
+                        ("admin_cred_set_monthly_cost", "💵 $ ماهانه"),
+                    ],
+                    [("admin_pricing_home", "🔙 قیمت و سود"), ("admin_shop", "🔙 فروشگاه")],
                 ]
             ),
         )
 
     async def credential_price_sync(self, event):
-        from supplier import usd_toman_rate
-
-        rate = await usd_toman_rate(await self.db.setting("usd_toman_rate", ""))
-        if not rate.get("ok"):
-            await self.send(
-                event["chat_id"],
-                "❌ نرخ دلار در دسترس نیست؛ از امور مالی → ✏️ نرخ دلار تنظیم کن.",
-            )
-            return
-        updated = await self.db.sync_credential_prices(rate["rate"])
-        await self.send(
-            event["chat_id"],
-            f"✅ قیمت جم با اطلاعات همگام شد.\n"
-            f"تعداد به‌روزرسانی: {updated}\n"
-            f"نرخ: {rate['rate']:,} تومان ({rate['source']})",
-        )
-        await self.credential_pricing_hub(event)
+        await self.admin_pricing_sync(event)
 
     async def dispatch_credential_action(self, event, user, action: str) -> bool:
         """Handle user/admin credential button/command ids. Return True if handled."""

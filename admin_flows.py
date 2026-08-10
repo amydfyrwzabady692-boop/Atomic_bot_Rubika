@@ -24,11 +24,7 @@ class AdminFlowHandlers:
     """Mixin: Router methods for button-driven admin CRUD."""
 
     async def open_admin_panel(self, event):
-        await self.send(
-            event["chat_id"],
-            "🛠 پنل مدیریت اتومیک روبیکا\nاز منوی پایین یا دکمه‌ها استفاده کن.",
-            menu=admin_menu(),
-        )
+        await self.admin_pricing_home(event, with_menu=True)
 
     async def ticket_reply_start(self, event, ticket_id: int, *, credential_only=False):
         ticket = await self.db.pool.fetchrow(
@@ -51,7 +47,7 @@ class AdminFlowHandlers:
         await self.send(
             event["chat_id"],
             f"💬 پاسخ به تیکت #{ticket_id}\nمتن پاسخ را همین‌جا بفرست:",
-            buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            buttons=inline([[("flow_cancel", "✖️ انصراف")]]),
         )
 
     async def ticket_reply_receive(self, event, data):
@@ -184,6 +180,24 @@ class AdminFlowHandlers:
         if kind not in {k for k, _ in PRODUCT_KINDS}:
             await self.send(event["chat_id"], "نوع نامعتبر است.")
             return
+        if kind == "gem_credentials":
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_product_add_cred_plan",
+                {"kind": kind},
+            )
+            await self.send(
+                event["chat_id"],
+                "دوره جم با اطلاعات را انتخاب کن:",
+                buttons=inline(
+                    [
+                        [("admin_cred_plan:weekly", "📅 هفتگی")],
+                        [("admin_cred_plan:monthly", "📆 ماهانه")],
+                        [("admin_products", "✖️ انصراف")],
+                    ]
+                ),
+            )
+            return
         await self.db.set_session(
             event["sender_id"], "admin_product_add_title", {"kind": kind}
         )
@@ -236,8 +250,9 @@ class AdminFlowHandlers:
             sku = ""
             amount = None
             if kind == "gem_credentials":
-                sku = "cred_weekly" if "هفته" in title else "cred_monthly"
-                amount = 60 if sku == "cred_weekly" else 300
+                plan = str(data.get("cred_plan") or "monthly")
+                sku = "cred_weekly" if plan == "weekly" else "cred_monthly"
+                amount = 60 if plan == "weekly" else 300
             await self.db.pool.execute(
                 """INSERT INTO products(
                      kind,title,price,stock,amount,supplier_sku,sort_order,active
@@ -271,6 +286,8 @@ class AdminFlowHandlers:
             buttons.append(
                 [
                     (f"admin_category_toggle:{row['id']}", f"{flag} #{row['id']}"),
+                    (f"admin_category_move:{row['id']}:up", "⬆️"),
+                    (f"admin_category_move:{row['id']}:down", "⬇️"),
                     (f"admin_category_del:{row['id']}", "🗑"),
                 ]
             )
@@ -326,9 +343,49 @@ class AdminFlowHandlers:
             return
         await self.db.set_setting(key, value)
         await self.db.set_session(event["sender_id"])
-        await self.send(event["chat_id"], f"✅ ذخیره شد: {key}")
+        sync_note = ""
+        pricing_keys = {
+            "usd_toman_rate",
+            "credential_weekly_profit_percent",
+            "credential_monthly_profit_percent",
+            "credential_weekly_cost_usd",
+            "credential_monthly_cost_usd",
+            "credential_profit_percent",
+        }
+        profit_keys = {
+            "gem_profit_percent",
+            "credential_weekly_profit_percent",
+            "credential_monthly_profit_percent",
+        }
+        if key in pricing_keys:
+            sync = await self.sync_credential_prices_now()
+            if sync.get("ok"):
+                sync_note = (
+                    f"\n🔄 قیمت جم با اطلاعات ({sync['updated']} محصول) "
+                    f"با نرخ {sync['rate']:,} تومان اعمال شد."
+                )
+            elif sync.get("error"):
+                sync_note = f"\n⚠️ sync قیمت: {sync['error']}"
+        if key == "gem_profit_percent":
+            try:
+                result = await self.run_gem_price_sync_router()
+                if result.get("ok"):
+                    sync_note = (
+                        f"\n🔄 قیمت جم با آیدی: {result.get('gem_updated', 0)} · "
+                        f"جم با اطلاعات: {result.get('cred_updated', 0)}"
+                    )
+                else:
+                    sync_note = f"\n⚠️ sync قیمت: {result.get('error')}"
+            except Exception:
+                log.exception("Price sync after gem profit change failed")
+                sync_note = "\n⚠️ sync قیمت انجام نشد."
+        await self.send(event["chat_id"], f"✅ ذخیره شد: {key}{sync_note}")
         if key.startswith(("card_", "zarinpal_", "usd_")):
             await self.admin(event, "admin_finance")
+        elif key in profit_keys:
+            await self.admin_pricing_home(event, with_menu=False)
+        elif key in pricing_keys:
+            await self.admin_pricing_home(event, with_menu=False)
         elif key in {"welcome_text", "help_text", "support_prompt"}:
             await self.admin(event, "admin_settings")
         elif key == "credential_support_id":

@@ -1,12 +1,18 @@
 import asyncio
+import json
 import os
 import re
 import time
 import threading
 import uuid
+import urllib.error
+import urllib.request
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import aiohttp
+
+NOBITEX_USDT_IRT_ORDERBOOK = "https://apiv2.nobitex.ir/v3/orderbook/USDTIRT"
+_rate_cache = {"at": 0.0, "value": None}
 
 _inventory_cache = {"at": 0.0, "value": None}
 _inventory_refresh_lock = threading.Lock()
@@ -92,25 +98,69 @@ def _normalise_catalogue_name(name):
     return " ".join(str(name or "").strip().casefold().split())
 
 
-async def usd_toman_rate(manual_rate=None):
-    timeout = aiohttp.ClientTimeout(total=8)
+def _parse_manual_usd_rate(manual_rate=None):
+    raw = str(manual_rate or os.getenv("USD_TOMAN_RATE", "") or "").replace(",", "").strip()
     try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if 10_000 <= value <= 10_000_000 else None
+
+
+def _parse_nobitex_usd_rate(data):
+    if data.get("status") != "ok":
+        raise ValueError("orderbook نوبیتکس معتبر نیست")
+    asks = data.get("asks") or []
+    if not asks or not asks[0]:
+        raise ValueError("ask نوبیتکس خالی است")
+    raw_rial = Decimal(str(asks[0][0]))
+    rate = int(
+        (raw_rial / Decimal(10)).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    )
+    if not 10_000 <= rate <= 10_000_000:
+        raise ValueError("نرخ خارج از محدوده ایمن است")
+    return rate
+
+
+def _fetch_nobitex_orderbook_urllib():
+    req = urllib.request.Request(
+        NOBITEX_USDT_IRT_ORDERBOOK,
+        headers={"Accept": "application/json", "User-Agent": "AtomicRubika/1.0"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=8) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def usd_toman_rate(manual_rate=None, *, force=False):
+    """بهترین ask بازار USDTIRT را از ریال به تومان تبدیل می‌کند."""
+    now = time.monotonic()
+    cached = _rate_cache.get("value")
+    if not force and cached and now - _rate_cache.get("at", 0) < 60:
+        return cached
+
+    manual = _parse_manual_usd_rate(manual_rate)
+    errors = []
+    result = None
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
-                "https://apiv2.nobitex.ir/v3/orderbook/USDTIRT",
+                NOBITEX_USDT_IRT_ORDERBOOK,
                 headers={
                     "Accept": "application/json",
                     "User-Agent": "AtomicRubika/1.0",
                 },
             ) as response:
                 data = await response.json(content_type=None)
-        asks = data.get("asks") or []
-        rate = int(
-            (Decimal(str(asks[0][0])) / Decimal(10)).quantize(Decimal(1), rounding=ROUND_HALF_UP)
-        )
-        if not 10_000 <= rate <= 10_000_000:
-            raise ValueError("rate out of range")
-        return {"ok": True, "rate": rate, "source": "nobitex_usdtirt_best_ask"}
+        rate = _parse_nobitex_usd_rate(data)
+        result = {
+            "ok": True,
+            "rate": rate,
+            "source": "nobitex_usdtirt_best_ask",
+            "fallback": False,
+        }
     except (
         aiohttp.ClientError,
         TimeoutError,
@@ -118,21 +168,54 @@ async def usd_toman_rate(manual_rate=None):
         KeyError,
         IndexError,
         ArithmeticError,
+        json.JSONDecodeError,
+        TypeError,
     ) as exc:
+        errors.append(str(exc))
+
+    if result is None:
         try:
-            manual = int(
-                str(manual_rate or os.getenv("USD_TOMAN_RATE", "")).replace(",", "")
-            )
-        except (TypeError, ValueError):
-            manual = 0
-        if 10_000 <= manual <= 10_000_000:
-            return {
+            data = await asyncio.to_thread(_fetch_nobitex_orderbook_urllib)
+            rate = _parse_nobitex_usd_rate(data)
+            result = {
+                "ok": True,
+                "rate": rate,
+                "source": "nobitex_usdtirt_best_ask",
+                "fallback": False,
+            }
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            KeyError,
+            IndexError,
+            ArithmeticError,
+            json.JSONDecodeError,
+            TypeError,
+        ) as exc:
+            errors.append(str(exc))
+
+    if result is None:
+        if manual:
+            result = {
                 "ok": True,
                 "rate": manual,
                 "source": "manual_fallback",
-                "warning": str(exc),
+                "fallback": True,
+                "warning": "؛ ".join(errors[:2]),
             }
-        return {"ok": False, "error": str(exc)}
+        else:
+            result = {
+                "ok": False,
+                "error": (
+                    "نرخ زنده دلار دریافت نشد و نرخ دستی تنظیم نشده است.\n"
+                    "از امور مالی → ✏️ نرخ دلار یک مقدار fallback بگذار."
+                ),
+            }
+
+    _rate_cache.update(at=now, value=result)
+    return result
 
 
 class G2Bulk:

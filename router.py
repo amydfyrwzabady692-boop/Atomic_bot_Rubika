@@ -2,6 +2,8 @@ import logging
 import os
 import re
 
+import asyncpg
+
 from admin_flows import AdminFlowHandlers
 from credentials import CredentialHandlers
 from database import Database
@@ -10,6 +12,7 @@ from payment_safety import (
     MIN_WALLET_CHARGE,
     checked_amount,
     checked_decimal,
+    order_amounts,
     supplier_cost_toman,
     valid_card_number,
 )
@@ -85,36 +88,87 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.send(event["chat_id"], "🚫 حساب شما مسدود است.")
             return
         action = event["button_id"] or event["text"].strip()
+        _user_label_map = {
+            "🎮 محصولات فری‌فایر": "gems",
+            "💎 خرید جم": "gems",
+            "💎 جم فری‌فایر": "gems",
+            "💰 کیف پول": "wallet",
+            "📦 سفارش‌های من": "orders",
+            "👤 حساب من": "account",
+            "🛍 فروشگاه": "store",
+            "🛍 فروشگاه اکانت": "store",
+            "🎯 پک سنسیویتی": "sense",
+            "🎯 پک سنس": "sense",
+            "🎁 ثبت کد": "promo",
+            "🎧 پشتیبانی": "support",
+            "🧑‍💻 پشتیبانی": "support",
+            "📚 راهنما": "help",
+            "🆔 شناسه من": "myid",
+            "🆔 جم با آیدی · تحویل لحظه‌ای": "gems_by_id",
+            "🔐 جم با اطلاعات · هفتگی / ماهانه": "gems_credentials",
+            "🏠 بازگشت": "home",
+            "🔙 منوی اصلی": "home",
+            "🔙 روش‌های خرید": "gems",
+            "🔙 پک سنس": "sense",
+            "🔙 بازگشت به دسته‌ها": "store",
+            "🔙 بازگشت به کیف پول": "wallet",
+            "✅ بررسی عضویت": "join_request",
+            "📱 موبایل": "sense_mobile",
+            "🖥 PC": "sense_pc",
+            "✏️ مبلغ دلخواه": "wallet_charge",
+        }
+        if not event["button_id"]:
+            action = _user_label_map.get(action, action)
         # برخی کلاینت‌های روبیکا برای دکمه‌های chat_keypad فقط متن دکمه را
         # می‌فرستند نه button_id را؛ متن دکمه‌های منوی ادمین را به action درست تبدیل کن.
         _admin_label_map = {
             "📊 آمار کلی": "admin_stats",
             "💵 نرخ و سود": "admin_fx",
+            "💵 نرخ دلار": "admin_fx",
             "📦 مدیریت محصولات": "admin_products",
             "🗂 دسته‌بندی": "admin_categories",
+            "🗂 دسته‌بندی‌ها": "admin_categories",
             "💳 بخش مالی": "admin_finance",
+            "💳 امور مالی": "admin_finance",
             "🧾 رسیدها": "admin_receipts",
             "👥 کاربران": "admin_users",
             "💰 شارژ کاربر": "admin_charge",
             "🔎 جستجو": "admin_search",
-            "🎧 پشتیبانی": "admin_support",
+            "🎧 تیکت‌های پشتیبانی": "admin_support",
             "📣 ارسال پیام": "admin_broadcast",
+            "📣 پیام همگانی": "admin_broadcast",
             "🎁 کدها": "admin_codes",
             "⚙️ تنظیمات": "admin_settings",
             "👮 مدیریت مدیران": "admin_admins",
             "🚨 مرکز عملیات": "admin_ops",
             "🛍 مدیریت فروشگاه": "admin_shop",
             "📦 سفارش‌ها": "admin_orders",
-            "📣 پیام همگانی": "admin_broadcast",
-            "🔄 بروزرسانی قیمت جم": "admin_sync_prices",
-            "📈 درصد سود جم": "admin_set_profit",
+            "🔄 بروزرسانی قیمت جم": "admin_pricing_sync",
+            "🔄 بروزرسانی قیمت": "admin_pricing_sync",
+            "🔄 همگام‌سازی قیمت‌ها": "admin_pricing_sync",
+            "🔄 sync جم با اطلاعات": "admin_pricing_sync",
+            "📈 درصد سود": "admin_pricing_home",
+            "📈 درصد سود جم": "admin_set_gem_id_profit",
+            "📅 سود هفتگی": "admin_cred_set_weekly_profit",
+            "📆 سود ماهانه": "admin_cred_set_monthly_profit",
+            "💱 قیمت‌گذاری جم با اطلاعات": "admin_pricing_home",
+            "💱 قیمت‌گذاری هفتگی/ماهانه": "admin_pricing_home",
+            "📈 قیمت و سود": "admin_pricing_home",
             "🔐 جم با اطلاعات": "cred_admin_home",
             "🛠 پنل مدیریت": "admin_panel",
+        }
+        _cred_staff_label_map = {
             "🔐 پنل جم با اطلاعات": "cred_admin_home",
             "📦 سفارش‌های آماده": "cred_admin_list",
             "🎫 تیکت‌ها": "cred_admin_tickets",
         }
-        action = _admin_label_map.get(action, action)
+        is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
+        is_cred_staff = await self.ensure_credential_staff(event["sender_id"])
+        if not event["button_id"]:
+            if is_admin:
+                action = _admin_label_map.get(action, action)
+            elif is_cred_staff:
+                action = _cred_staff_label_map.get(action, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
             await self.db.set_session(event["sender_id"])
             await self.start(event, user)
@@ -125,16 +179,34 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             else:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
             return
-        if action == "/myid":
-            # شناسه روبیکای خودت را ببین؛ مالک برای تنظیم RUBIKA_ADMIN_ID به این
-            # نیاز دارد و هر کاربر هم می‌تواند برای پشتیبانی آن را بفرستد.
+        if action in {"admin_cancel_broadcast", "flow_cancel", "support_cancel"}:
+            state, _ = await self.db.session(event["sender_id"])
+            if action == "support_cancel" and state != "support_message":
+                await self.send(event["chat_id"], "ثبت تیکت فعالی نیست.")
+                return
+            if action in {"admin_cancel_broadcast", "flow_cancel"} and not state:
+                await self.send(event["chat_id"], "عملیات فعالی برای لغو نیست.")
+                return
+            await self.db.set_session(event["sender_id"])
+            if is_admin:
+                menu = admin_menu()
+            elif is_cred_staff:
+                menu = credential_staff_menu()
+            else:
+                menu = await self.user_menu(event["sender_id"])
+            label = (
+                "✖️ ثبت تیکت لغو شد."
+                if action == "support_cancel"
+                else "✖️ عملیات لغو شد."
+            )
+            await self.send(event["chat_id"], label, menu=menu)
+            return
+        if action in {"/myid", "myid", "🆔 شناسه من"}:
             await self.send(
                 event["chat_id"],
                 f"🆔 شناسه روبیکای شما:\n{event['sender_id']}",
             )
             return
-        is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
-        is_cred_staff = await self.ensure_credential_staff(event["sender_id"])
         receipt_in_progress = False
         if event.get("file"):
             current_state, _ = await self.db.session(event["sender_id"])
@@ -151,13 +223,35 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         # قیمت‌گذاری فقط برای ادمین کامل (قبل از مسیر عمومی cred_*)
         if action in {
             "admin_cred_pricing",
+            "admin_pricing_home",
+            "admin_pricing_sync",
+            "admin_set_profit",
             "cred_pricing",
             "cred_price_sync",
-        } or action.startswith("admin_cred_set_"):
+            "admin_profit_sync",
+            "admin_sync_prices",
+        } or action.startswith(
+            ("admin_cred_set_", "admin_set_gem_id_profit")
+        ):
             if not is_admin:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
                 return
-            if action.startswith("admin_cred_set_"):
+            if action in {
+                "admin_pricing_home",
+                "admin_set_profit",
+                "admin_cred_pricing",
+            }:
+                await self.admin_pricing_home(event, with_menu=True)
+                return
+            if action in {
+                "admin_pricing_sync",
+                "cred_price_sync",
+                "admin_profit_sync",
+                "admin_sync_prices",
+            }:
+                await self.admin_pricing_sync(event)
+                return
+            if action.startswith(("admin_cred_set_", "admin_set_gem_id_profit")):
                 await self._start_credential_setting(event, action)
                 return
             await self.dispatch_credential_action(event, user, action)
@@ -297,7 +391,87 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             return
         if action == "gem_cancel":
             await self.db.set_session(event["sender_id"])
-            await self.send(event["chat_id"], "✖️ ثبت سفارش لغو شد.", menu=main_menu())
+            await self.send(
+                event["chat_id"],
+                "✖️ ثبت سفارش لغو شد.",
+                menu=await self.user_menu(event["sender_id"]),
+            )
+            return
+        if action.startswith("pay_check:"):
+            order_arg = action.removeprefix("pay_check:")
+            if not order_arg.isdigit():
+                await self.send(event["chat_id"], "❌ شناسه سفارش نامعتبر است.")
+                return
+            await self.check_gateway_payment(event, user, order_id=int(order_arg))
+            return
+        if action.startswith("wallet_check:"):
+            payment_arg = action.removeprefix("wallet_check:")
+            if not payment_arg.isdigit():
+                await self.send(event["chat_id"], "❌ شناسه پرداخت نامعتبر است.")
+                return
+            await self.check_gateway_payment(event, user, payment_id=int(payment_arg))
+            return
+        if action.startswith("order_pay:"):
+            order_arg = action.removeprefix("order_pay:")
+            if not order_arg.isdigit():
+                await self.send(event["chat_id"], "❌ شناسه سفارش نامعتبر است.")
+                return
+            await self.resume_order_payment(event, user, int(order_arg))
+            return
+        if action == "card_receipt_cancel":
+            state, data = await self.db.session(event["sender_id"])
+            if state != "card_receipt":
+                await self.send(event["chat_id"], "فرآیند پرداخت فعالی نیست.")
+                return
+            order_id = data.get("order_id")
+            payment_id = data.get("payment_id")
+            await self.db.set_session(event["sender_id"])
+            if payment_id and str(payment_id).isdigit():
+                await self.db.pool.execute(
+                    """UPDATE payments SET status='cancelled'
+                       WHERE id=$1 AND user_id=$2 AND status='pending'""",
+                    int(payment_id),
+                    user["id"],
+                )
+            if order_id and str(order_id).isdigit():
+                order = await self.db.pool.fetchrow(
+                    """SELECT id,status,payable_amount,wallet_paid,inventory_reserved
+                       FROM orders WHERE id=$1 AND user_id=$2""",
+                    int(order_id),
+                    user["id"],
+                )
+                if (
+                    order
+                    and order["status"] == "pending"
+                    and order["inventory_reserved"]
+                    and int(order["payable_amount"] or 0) > 0
+                ):
+                    wallet_paid = int(order["wallet_paid"] or 0)
+                    text = "✖️ ارسال رسید لغو شد."
+                    if wallet_paid:
+                        text += (
+                            f"\n💰 {wallet_paid:,} تومان قبلاً از کیف پول کسر شده؛ "
+                            "برای پرداخت باقی‌مانده روش دیگری انتخاب کن."
+                        )
+                    else:
+                        text += "\nروش پرداخت را دوباره انتخاب کن:"
+                    await self.send(
+                        event["chat_id"],
+                        text,
+                        buttons=inline(
+                            [
+                                [(f"pay:gateway:{order_id}", "🌐 درگاه زرین‌پال")],
+                                [(f"pay:card:{order_id}", "💳 کارت‌به‌کارت")],
+                                [(f"pay_cancel:{order_id}", "✖️ لغو سفارش")],
+                            ]
+                        ),
+                    )
+                    return
+            await self.send(
+                event["chat_id"],
+                "✖️ ارسال رسید لغو شد.",
+                menu=await self.user_menu(event["sender_id"]),
+            )
             return
         if action.startswith("pay:"):
             match = re.fullmatch(r"pay:(gateway|card|wallet):([1-9]\d*)", action)
@@ -346,7 +520,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 text = "✖️ سفارش لغو شد."
                 if refunded:
                     text += f"\n💰 {refunded:,} تومان به کیف پول برگشت."
-                await self.send(event["chat_id"], text, menu=main_menu())
+                await self.send(
+                    event["chat_id"],
+                    text,
+                    menu=await self.user_menu(event["sender_id"]),
+                )
             except ValueError as exc:
                 await self.send(event["chat_id"], f"❌ {exc}")
             return
@@ -397,6 +575,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 event["chat_id"],
                 prompt
                 or f"پیامت را برای دپارتمان «{department['title']}» بنویس:",
+                buttons=inline([[("support_cancel", "✖️ انصراف")]]),
             )
             return
         routes = {
@@ -430,10 +609,32 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "🎁 ثبت کد": lambda: self.ask_promo(event),
             "help": lambda: self.help(event),
             "📚 راهنما": lambda: self.help(event),
+            "myid": lambda: self.send(
+                event["chat_id"],
+                f"🆔 شناسه روبیکای شما:\n{event['sender_id']}",
+            ),
+            "🆔 شناسه من": lambda: self.send(
+                event["chat_id"],
+                f"🆔 شناسه روبیکای شما:\n{event['sender_id']}",
+            ),
             "join_request": lambda: self.join_request(event, user),
         }
+        _menu_reset_actions = {
+            "home", "🏠 منوی کاربر", "/start", "شروع",
+            "help", "📚 راهنما", "myid", "🆔 شناسه من",
+        }
+        active_state, active_data = await self.db.session(event["sender_id"])
         handler = routes.get(action)
         if handler:
+            if (
+                active_state
+                and action not in _menu_reset_actions
+                and action not in {"wallet_charge", "join_request"}
+            ):
+                await self.flow_in_progress_prompt(
+                    event, active_state, active_data
+                )
+                return
             if action not in {"wallet_charge", "join_request"}:
                 await self.db.set_session(event["sender_id"])
             await handler()
@@ -442,7 +643,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         if state:
             await self.handle_state(event, user, state, data)
             return
-        await self.send(event["chat_id"], "از منوی پایین انتخاب کن 👇", menu=main_menu())
+        await self.send(
+            event["chat_id"],
+            "از منوی پایین انتخاب کن 👇",
+            menu=await self.user_menu(event["sender_id"]),
+        )
 
     async def can_use_bot(self, user_id: int) -> bool:
         channels_exist = await self.db.pool.fetchval(
@@ -457,6 +662,12 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                    ORDER BY id DESC LIMIT 1""",
                 user_id,
             )
+        )
+
+    async def _invalidate_join_approvals(self):
+        await self.db.pool.execute(
+            """UPDATE join_requests SET status='stale'
+               WHERE status='approved'"""
         )
 
     async def _delivery_preflight(self, order_id):
@@ -759,7 +970,9 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         try:
             order, product = await self.db.create_order(user["id"], product_id, player_id)
         except ValueError as exc:
-            await self.send(event["chat_id"], f"❌ {exc}", menu=main_menu())
+            await self.send(
+                event["chat_id"], f"❌ {exc}", menu=await self.user_menu(event["sender_id"])
+            )
             return
         balance = await self.db.pool.fetchval(
             "SELECT balance FROM users WHERE id=$1",
@@ -784,8 +997,294 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             ]
         )
 
+    @staticmethod
+    def gateway_followup_buttons(order_id=None, *, payment_id=None):
+        rows = []
+        if order_id is not None:
+            rows.extend(
+                [
+                    [(f"pay_check:{order_id}", "✅ پرداخت کردم")],
+                    [(f"pay_reopen:{order_id}", "🔁 نمایش دوباره لینک")],
+                    [(f"pay_change:{order_id}", "🔄 تغییر روش پرداخت")],
+                ]
+            )
+        elif payment_id is not None:
+            rows.extend(
+                [
+                    [(f"wallet_check:{payment_id}", "✅ پرداخت کردم")],
+                    [("wallet", "🔙 بازگشت به کیف پول")],
+                ]
+            )
+        return inline(rows) if rows else None
+
+    async def flow_in_progress_prompt(self, event, state, data):
+        buttons = [[("home", "🏠 منوی کاربر")]]
+        if state == "card_receipt":
+            buttons = [[("card_receipt_cancel", "✖️ لغو ارسال رسید")]]
+            if data.get("order_id"):
+                buttons.append(
+                    [(f"pay_cancel:{data['order_id']}", "✖️ لغو سفارش")]
+                )
+        elif state in {"gem_player_id", "gem_confirm"}:
+            buttons = [[("gem_cancel", "✖️ انصراف از خرید")]]
+        elif state == "support_message":
+            buttons = [[("support_cancel", "✖️ انصراف از تیکت")]]
+        elif state == "wallet_amount":
+            buttons = [[("wallet", "🔙 بازگشت به کیف پول")]]
+        elif state in {"promo_code", "account_card", "account_referral"}:
+            buttons = [[("home", "🏠 منوی کاربر")]]
+        elif state.startswith("admin_"):
+            buttons = [[("admin_cancel_broadcast", "✖️ انصراف")]]
+        elif state.startswith("cred_") or state == "admin_ticket_reply":
+            buttons = [[("cred_cancel", "❌ انصراف")]]
+            if state == "admin_ticket_reply":
+                buttons = [[("flow_cancel", "✖️ انصراف")]]
+        await self.send(
+            event["chat_id"],
+            "⚠️ یک فرآیند نیمه‌کاره داری.\n"
+            "اول آن را تمام کن یا با دکمه زیر لغو کن.",
+            buttons=inline(buttons),
+        )
+
+    async def check_gateway_payment(
+        self, event, user, *, order_id=None, payment_id=None
+    ):
+        payment = None
+        if order_id is not None:
+            payment = await self.db.active_order_gateway(user["id"], order_id)
+            if not payment:
+                payment = await self.db.pool.fetchrow(
+                    """SELECT p.* FROM payments p
+                       JOIN orders o ON o.id=p.order_id
+                       WHERE p.order_id=$1 AND o.user_id=$2
+                         AND p.provider='gateway' AND p.authority IS NOT NULL
+                         AND p.status IN ('pending','expired','cancelled','rejected')
+                       ORDER BY p.id DESC LIMIT 1""",
+                    order_id,
+                    user["id"],
+                )
+        elif payment_id is not None:
+            payment = await self.db.pool.fetchrow(
+                """SELECT * FROM payments
+                   WHERE id=$1 AND user_id=$2 AND provider='gateway'""",
+                payment_id,
+                user["id"],
+            )
+        if not payment or not payment.get("authority"):
+            await self.send(
+                event["chat_id"],
+                "❌ لینک درگاه فعالی پیدا نشد. دوباره روش پرداخت را انتخاب کن.",
+            )
+            return
+        if payment.get("status") == "verified":
+            ref = payment.get("ref_id") or "—"
+            await self.send(
+                event["chat_id"],
+                f"✅ این پرداخت قبلاً ثبت شده.\nکد پیگیری: {ref}",
+                menu=await self.user_menu(event["sender_id"]),
+            )
+            return
+        if payment.get("order_id"):
+            order = await self.db.pool.fetchrow(
+                "SELECT status FROM orders WHERE id=$1 AND user_id=$2",
+                payment["order_id"],
+                user["id"],
+            )
+            if order and order["status"] not in {"pending"}:
+                await self.send(
+                    event["chat_id"],
+                    f"✅ سفارش #{payment['order_id']} دیگر در انتظار پرداخت نیست.",
+                    menu=await self.user_menu(event["sender_id"]),
+                )
+                return
+        await self.send(event["chat_id"], "⏳ در حال بررسی پرداخت در درگاه…")
+        verify_status, ref_id = await self.zarinpal.verify(
+            payment["amount"],
+            payment["authority"],
+        )
+        if verify_status == "verified":
+            try:
+                finalized, changed = await self.db.finalize_gateway(
+                    payment["authority"],
+                    ref_id,
+                )
+            except ValueError as exc:
+                await self.send(event["chat_id"], f"❌ {exc}")
+                return
+            user_menu = await self.user_menu(event["sender_id"])
+            if changed:
+                await self.send(
+                    event["chat_id"],
+                    f"✅ پرداخت {finalized['amount']:,} تومان ثبت شد.\n"
+                    f"کد پیگیری: {ref_id}",
+                    menu=user_menu,
+                )
+            else:
+                await self.send(
+                    event["chat_id"],
+                    f"✅ این پرداخت قبلاً ثبت شده.\nکد پیگیری: {ref_id}",
+                    menu=user_menu,
+                )
+            return
+        if verify_status == "not_paid":
+            followup = self.gateway_followup_buttons(
+                order_id=payment.get("order_id"),
+                payment_id=payment["id"] if not payment.get("order_id") else None,
+            )
+            await self.send(
+                event["chat_id"],
+                "❌ هنوز پرداخت در درگاه تأیید نشده.\n"
+                "اگر واریز کرده‌ای، چند لحظه صبر کن و دوباره «پرداخت کردم» را بزن.",
+                buttons=followup,
+            )
+            return
+        await self.send(
+            event["chat_id"],
+            "⚠️ ارتباط با درگاه برقرار نشد؛ کمی بعد دوباره تلاش کن.",
+            buttons=self.gateway_followup_buttons(
+                order_id=payment.get("order_id"),
+                payment_id=payment["id"] if not payment.get("order_id") else None,
+            ),
+        )
+
+    async def resume_order_payment(self, event, user, order_id: int):
+        order = await self.db.pool.fetchrow(
+            """SELECT o.*,
+                      (SELECT p.title FROM order_items oi
+                       JOIN products p ON p.id=oi.product_id
+                       WHERE oi.order_id=o.id LIMIT 1) AS title
+               FROM orders o
+               WHERE o.id=$1 AND o.user_id=$2""",
+            order_id,
+            user["id"],
+        )
+        if (
+            not order
+            or order["status"] != "pending"
+            or not order["inventory_reserved"]
+            or order["payable_amount"] <= 0
+        ):
+            await self.send(event["chat_id"], "این سفارش دیگر قابل پرداخت نیست.")
+            return
+        existing_gateway = await self.db.active_order_gateway(user["id"], order_id)
+        if existing_gateway:
+            await self.send_gateway_link(
+                event, existing_gateway, order_id, existing=True
+            )
+            return
+        balance = await self.db.pool.fetchval(
+            "SELECT balance FROM users WHERE id=$1",
+            user["id"],
+        )
+        await self.send(
+            event["chat_id"],
+            f"🧾 سفارش #{order_id}\n"
+            f"{order.get('title') or 'محصول'}\n"
+            f"مبلغ: {order['payable_amount']:,} تومان\n"
+            f"موجودی کیف پول: {balance:,} تومان\nروش پرداخت:",
+            buttons=self.payment_method_buttons(order_id),
+        )
+
+    async def admin_pricing_home(self, event, *, with_menu=False):
+        """صفحه اول پنل: سود جم/هفتگی/ماهانه + قیمت‌گذاری جم با اطلاعات."""
+        from supplier import compute_gem_sale_price, usd_toman_rate
+
+        await self.db.set_session(event["sender_id"])
+        cfg = await self.db.get_credential_pricing_config()
+        gem_profit = await self.gem_profit_percent()
+        manual = await self.db.setting("usd_toman_rate", "")
+        live = await usd_toman_rate(manual, force=False)
+        products = await self.db.credential_products_admin()
+        last_sync = await self.db.setting_timestamp("gem_price_last_sync")
+        lines = [
+            "🛠 صفحه اول پنل مدیریت",
+            "━━━━━━━━━━━━━━━",
+            "📈 درصد سود",
+            f"💎 جم با آیدی: {gem_profit}٪",
+            f"📅 هفتگی: {cfg['weekly_profit']}٪",
+            f"📆 ماهانه: {cfg['monthly_profit']}٪",
+            "",
+            "💱 قیمت‌گذاری جم با اطلاعات",
+            "(مستقل از G2Bulk — فقط $ × نرخ لحظه‌ای × سود)",
+            f"💵 بهای خالص هفتگی: {cfg['weekly_cost']} USD",
+            f"💵 بهای خالص ماهانه: {cfg['monthly_cost']} USD",
+        ]
+        if live.get("ok"):
+            weekly_sale = await compute_gem_sale_price(
+                cfg["weekly_cost"], live["rate"], cfg["weekly_profit"]
+            )
+            monthly_sale = await compute_gem_sale_price(
+                cfg["monthly_cost"], live["rate"], cfg["monthly_profit"]
+            )
+            lines.extend(
+                [
+                    f"💱 نرخ لحظه‌ای: {live['rate']:,} ت ({live['source']})",
+                    f"📅 قیمت فروش هفتگی: {weekly_sale:,} ت",
+                    f"📆 قیمت فروش ماهانه: {monthly_sale:,} ت",
+                ]
+            )
+        else:
+            lines.append(
+                f"⚠️ نرخ لحظه‌ای نیامد؛ fallback: {manual or 'تنظیم نشده'}"
+            )
+        if last_sync:
+            lines.append(f"🕐 آخرین sync: {last_sync.strftime('%Y-%m-%d %H:%M')}")
+        lines.append("\nمحصولات فعال:")
+        if products:
+            for p in products:
+                lines.append(f"• {p['title']} — {int(p['price']):,} ت")
+        else:
+            lines.append("• محصولی نیست — دکمه همگام‌سازی را بزن.")
+        await self.send(
+            event["chat_id"],
+            "\n".join(lines),
+            menu=admin_menu() if with_menu else None,
+            buttons=inline(
+                [
+                    [
+                        ("admin_set_gem_id_profit", "✏️ سود جم"),
+                        ("admin_cred_set_weekly_profit", "✏️ سود هفتگی"),
+                    ],
+                    [("admin_cred_set_monthly_profit", "✏️ سود ماهانه")],
+                    [
+                        ("admin_cred_set_weekly_cost", "✏️ $ هفتگی"),
+                        ("admin_cred_set_monthly_cost", "✏️ $ ماهانه"),
+                    ],
+                    [("admin_pricing_sync", "🔄 همگام‌سازی قیمت‌ها")],
+                ]
+            ),
+        )
+
+    async def admin_pricing_sync(self, event):
+        """همگام‌سازی جم با اطلاعات — فقط $1.328/$6.64 × نرخ لحظه‌ای (بدون G2Bulk)."""
+        chat = event["chat_id"]
+        await self.send(chat, "⏳ همگام‌سازی قیمت جم با اطلاعات…")
+        try:
+            cred = await self.sync_credential_prices_now(force=True)
+        except Exception as exc:
+            log.exception("Credential price sync crashed")
+            await self.send(chat, f"❌ خطا:\n{exc}")
+            return
+        if not cred.get("ok"):
+            await self.send(
+                chat,
+                f"❌ نشد:\n{cred.get('error')}\n"
+                "از 💳 امور مالی → ✏️ نرخ دلار یک عدد بگذار (fallback).",
+            )
+            return
+        await self.send(chat, self.format_credential_sync_report(cred))
+        await self.admin_pricing_home(event, with_menu=False)
+
+    async def profit_settings_hub(self, event):
+        await self.admin_pricing_home(event, with_menu=False)
+
     async def _start_credential_setting(self, event, action: str):
         mapping = {
+            "admin_set_gem_id_profit": (
+                "gem_profit_percent",
+                "profit",
+                "💎 سود جم با آیدی (۱ تا ۲۰۰٪)",
+            ),
             "admin_cred_set_weekly_profit": (
                 "credential_weekly_profit_percent",
                 "profit",
@@ -821,7 +1320,36 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         await self.send(
             event["chat_id"],
             f"{title}\nمقدار فعلی: {current or '—'}\n\nمقدار جدید را بفرست:",
-            buttons=inline([[("admin_cred_pricing", "🔙 بازگشت"), ("admin_cancel_broadcast", "✖️ انصراف")]]),
+            buttons=inline(
+                [[("admin_pricing_home", "🔙 قیمت و سود"), ("admin_cancel_broadcast", "✖️ انصراف")]]
+            ),
+        )
+
+    async def send_card_transfer_messages(
+        self,
+        chat_id,
+        *,
+        amount: int,
+        holder: str,
+        bank: str,
+        number: str,
+        title: str,
+        buttons=None,
+    ):
+        """پیام‌های کارت‌به‌کارت را جدا می‌فرستد تا کپی و خواندن راحت‌تر باشد."""
+        await self.send(
+            chat_id,
+            f"💳 {title}\n\nمبلغ دقیق واریز:\n{int(amount):,} تومان",
+            buttons=buttons,
+        )
+        await self.send(
+            chat_id,
+            f"👤 به نام: {holder or '—'}\n🏦 بانک: {bank or '—'}",
+        )
+        await self.send(chat_id, self.pretty_card(number))
+        await self.send(
+            chat_id,
+            "پس از واریز، تصویر رسید را همین‌جا ارسال کن.",
         )
 
     async def send_gateway_link(
@@ -847,12 +1375,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 await self.send(
                     event["chat_id"],
                     "اگر لینک باز نشد، روی لینک بالا بزن یا کپی کن.",
-                    buttons=inline(
-                        [
-                            [(f"pay_reopen:{order_id}", "🔁 نمایش دوباره لینک")],
-                            [(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")],
-                        ]
-                    ),
+                    buttons=self.gateway_followup_buttons(order_id),
                 )
         except RubikaAPIError:
             log.exception("Rubika rejected gateway Link keypad; sending plain URL")
@@ -893,20 +1416,32 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     buttons=inline(
                         [
                             [(f"pay_reopen:{order_id}", "🔗 نمایش لینک قبلی")],
+                            [(f"pay_check:{order_id}", "✅ پرداخت کردم")],
                             [(f"pay_change:{order_id}", "🔄 تغییر امن روش پرداخت")],
                         ]
                     ),
                 )
             return
         if method == "wallet":
+            available, preflight_error, _cost, _balance = await self._delivery_preflight(
+                order_id
+            )
+            if not available:
+                await self.send(
+                    event["chat_id"],
+                    "❌ موجودی سرویس تحویل برای این بسته کافی نیست؛ "
+                    "برای جلوگیری از کسر پول، پرداخت باز نشد.",
+                )
+                return
             try:
                 result = await self.db.wallet_pay(user["id"], order_id)
+                user_menu = await self.user_menu(event["sender_id"])
                 if result["paid"]:
                     await self.send(
                         event["chat_id"],
                         f"✅ پرداخت {result['used']:,} تومان از کیف پول انجام شد.\n"
                         f"موجودی جدید: {result['balance']:,} تومان",
-                        menu=main_menu(),
+                        menu=user_menu,
                     )
                 else:
                     await self.send(
@@ -978,22 +1513,42 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 payment["amount"], f"Atomic Rubika order #{order_id}", callback
             )
             if error:
+                await self.db.pool.execute(
+                    """UPDATE payments SET status='cancelled'
+                       WHERE id=$1 AND status='pending'""",
+                    payment["id"],
+                )
                 await self.send(event["chat_id"], f"❌ {error}")
                 return
             await self.db.attach_authority(payment["id"], authority)
             payment = dict(payment)
             payment["authority"] = authority
             await self.send_gateway_link(event, payment, order_id, url=url)
+            await self.send(
+                event["chat_id"],
+                "پس از پرداخت در درگاه، «پرداخت کردم» را بزن تا سریع‌تر ثبت شود.",
+                buttons=self.gateway_followup_buttons(order_id),
+            )
             return
-        await self.db.set_session(event["sender_id"], "card_receipt", {"payment_id": payment["id"]})
-        await self.send(
-            event["chat_id"],
-            f"💳 مبلغ دقیق: {payment['amount']:,} تومان\n"
-            f"به نام: {holder}\nبانک: {bank}\n\n"
-            "شماره کارت در پیام بعدی آمده؛ روی آن نگه دار و کپی کن.",
+        await self.db.set_session(
+            event["sender_id"],
+            "card_receipt",
+            {"payment_id": payment["id"], "order_id": order_id},
         )
-        await self.send(event["chat_id"], self.pretty_card(number))
-        await self.send(event["chat_id"], "پس از واریز، تصویر رسید را همین‌جا ارسال کن.")
+        await self.send_card_transfer_messages(
+            event["chat_id"],
+            amount=payment["amount"],
+            holder=holder,
+            bank=bank,
+            number=number,
+            title="کارت‌به‌کارت سفارش",
+            buttons=inline(
+                [
+                    [("card_receipt_cancel", "✖️ انصراف")],
+                    [(f"pay_cancel:{order_id}", "✖️ لغو سفارش")],
+                ]
+            ),
+        )
 
     async def wallet(self, event, user):
         fresh = await self.db.pool.fetchrow("SELECT * FROM users WHERE id=$1", user["id"])
@@ -1066,12 +1621,22 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 callback,
             )
             if error:
+                await self.db.pool.execute(
+                    """UPDATE payments SET status='cancelled'
+                       WHERE id=$1 AND status='pending'""",
+                    payment["id"],
+                )
                 await self.send(event["chat_id"], f"❌ {error}")
                 return
             await self.db.attach_authority(payment["id"], authority)
             payment = dict(payment)
             payment["authority"] = authority
             await self.send_gateway_link(event, payment, url=url)
+            await self.send(
+                event["chat_id"],
+                "پس از پرداخت در درگاه، «پرداخت کردم» را بزن.",
+                buttons=self.gateway_followup_buttons(payment_id=payment["id"]),
+            )
             return
         if await self.db.setting("card_enabled", "1") != "1":
             await self.send(event["chat_id"], "کارت‌به‌کارت فعلاً غیرفعال است.")
@@ -1101,16 +1666,14 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "card_receipt",
             {"payment_id": payment["id"]},
         )
-        await self.send(
+        await self.send_card_transfer_messages(
             event["chat_id"],
-            f"💳 شارژ کیف پول: {amount:,} تومان\n"
-            f"به نام: {holder or '—'}\nبانک: {bank or '—'}\n\n"
-            "شماره کارت در پیام بعدی آمده؛ روی آن نگه دار و کپی کن.",
-        )
-        await self.send(event["chat_id"], self.pretty_card(number))
-        await self.send(
-            event["chat_id"],
-            "مبلغ را دقیق واریز کن و تصویر رسید را همین‌جا بفرست.",
+            amount=amount,
+            holder=holder,
+            bank=bank,
+            number=number,
+            title="شارژ کیف پول",
+            buttons=inline([[("card_receipt_cancel", "✖️ انصراف")]]),
         )
 
     @staticmethod
@@ -1122,9 +1685,22 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             return digits
         return str(number)
 
+    @staticmethod
+    def _format_order_line(row, labels):
+        amount = int(row["payable_amount"] or 0)
+        line = (
+            f"#{row['id']} | {labels.get(row['status'], row['status'])} | "
+            f"{amount:,} تومان"
+        )
+        wallet_paid = int(row.get("wallet_paid") or 0)
+        if row["status"] == "pending" and wallet_paid > 0:
+            line += f" (پرداخت‌شده از کیف: {wallet_paid:,})"
+        return line
+
     async def orders(self, event, user):
         rows = await self.db.pool.fetch(
-            """SELECT id,status,total_amount,discount_amount,payable_amount,created_at
+            """SELECT id,status,total_amount,discount_amount,payable_amount,
+                      wallet_paid,inventory_reserved,created_at
                FROM orders
                WHERE user_id=$1 ORDER BY id DESC LIMIT 10""",
             user["id"],
@@ -1141,14 +1717,27 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         }
         text = "📦 سفارش‌های اخیر:\n" + (
             "\n".join(
-                f"#{row['id']} | {labels.get(row['status'], row['status'])} | "
-                f"{row['total_amount']-row['discount_amount']:,} تومان"
+                self._format_order_line(row, labels)
                 for row in rows
             )
             if rows
             else "هنوز سفارشی نداری."
         )
-        await self.send(event["chat_id"], text)
+        buttons = []
+        for row in rows:
+            if (
+                row["status"] == "pending"
+                and row["payable_amount"] > 0
+                and row["inventory_reserved"]
+            ):
+                buttons.append(
+                    [(f"order_pay:{row['id']}", f"💳 پرداخت #{row['id']}")]
+                )
+        await self.send(
+            event["chat_id"],
+            text,
+            buttons=inline(buttons) if buttons else None,
+        )
 
     async def account(self, event, user):
         fresh = await self.db.pool.fetchrow(
@@ -1185,7 +1774,8 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         await self.db.set_session(event["sender_id"], "account_referral")
         await self.send(
             event["chat_id"],
-            "شناسه عددی کاربر معرف را بفرست:",
+            "شناسه روبیکای کاربر معرف را بفرست (مثلاً u0...):\n"
+            "همان شناسه‌ای که در «🆔 شناسه من» نمایش داده می‌شود.",
         )
 
     async def ask_support(self, event):
@@ -1205,6 +1795,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.send(
                 event["chat_id"],
                 prompt or "پیام خودت را برای پشتیبانی بنویس:",
+                buttons=inline([[("support_cancel", "✖️ انصراف")]]),
             )
             return
         await self.send(
@@ -1236,6 +1827,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         )
 
     async def handle_state(self, event, user, state, data):
+        if state.startswith("admin_") and state != "admin_ticket_reply":
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
         if state in {"cred_method", "cred_confirm"}:
             await self.credential_prompt_current_step(event, state, data)
             return
@@ -1254,6 +1850,14 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             return
         if state.startswith("admin_product_add_"):
             if await self.product_add_handle_state(event, state, data):
+                return
+            if state == "admin_product_add_kind":
+                await self.product_add_start(event)
+                return
+            if state == "admin_product_add_cred_plan":
+                await self.product_kind_selected(
+                    event, str(data.get("kind") or "gem_credentials")
+                )
                 return
         if state == "admin_product_edit_price":
             try:
@@ -1322,15 +1926,22 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 )
                 return
             chat_id, title, url = parts[0], parts[1], parts[2]
-            await self.db.pool.execute(
-                """INSERT INTO forced_channels(chat_id,title,invite_url,active)
-                   VALUES($1,$2,$3,true)
-                   ON CONFLICT(chat_id) DO UPDATE
-                   SET title=EXCLUDED.title,invite_url=EXCLUDED.invite_url,active=true""",
-                chat_id,
-                title,
-                url,
-            )
+            async with self.db.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        """INSERT INTO forced_channels(chat_id,title,invite_url,active)
+                           VALUES($1,$2,$3,true)
+                           ON CONFLICT(chat_id) DO UPDATE
+                           SET title=EXCLUDED.title,invite_url=EXCLUDED.invite_url,
+                               active=true""",
+                        chat_id,
+                        title,
+                        url,
+                    )
+                    await conn.execute(
+                        """UPDATE join_requests SET status='stale'
+                           WHERE status='approved'"""
+                    )
             await self.db.set_session(event["sender_id"])
             await self.send(event["chat_id"], f"✅ کانال «{title}» اضافه شد.")
             await self.admin(event, "admin_settings")
@@ -1406,6 +2017,20 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     ]
                 ),
             )
+            return
+        if state == "gem_confirm":
+            await self.send(
+                event["chat_id"],
+                "از دکمه‌های «تأیید»، «اصلاح آیدی» یا «انصراف» استفاده کن.",
+                buttons=inline(
+                    [
+                        [("gem_confirm", "✅ تأیید و ادامه پرداخت")],
+                        [("gem_reedit", "✏️ اصلاح آیدی")],
+                        [("gem_cancel", "✖️ انصراف")],
+                    ]
+                ),
+            )
+            return
         elif state == "wallet_amount":
             raw_amount = (
                 event["text"]
@@ -1505,7 +2130,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.send(
                 event["chat_id"],
                 "✅ شماره کارت ثبت شد و پس از بررسی مدیر فعال می‌شود.",
-                menu=main_menu(),
+                menu=await self.user_menu(event["sender_id"]),
             )
             await self.send(
                 self.config.admin_chat_id,
@@ -1522,24 +2147,26 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 ),
             )
         elif state == "account_referral":
-            referral_arg = (
-                event["text"]
-                .translate(
-                    str.maketrans(
-                        "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
-                        "01234567890123456789",
-                    )
-                )
-                .strip()
+            referral_arg = (event.get("text") or "").strip()
+            if not referral_arg:
+                await self.send(event["chat_id"], "❌ کد معرف خالی است.")
+                return
+            referrer = await self.db.pool.fetchrow(
+                "SELECT id FROM users WHERE rubika_id=$1",
+                referral_arg,
             )
-            if not referral_arg.isdigit() or int(referral_arg) == user["id"]:
+            if not referrer and referral_arg.isdigit():
+                referrer = await self.db.pool.fetchrow(
+                    "SELECT id FROM users WHERE id=$1",
+                    int(referral_arg),
+                )
+            if not referrer or referrer["id"] == user["id"]:
                 await self.send(event["chat_id"], "❌ کد معرف معتبر نیست.")
                 return
             changed = await self.db.pool.execute(
                 """UPDATE users SET referred_by=$1
-                   WHERE id=$2 AND referred_by IS NULL
-                     AND EXISTS(SELECT 1 FROM users WHERE id=$1)""",
-                int(referral_arg),
+                   WHERE id=$2 AND referred_by IS NULL""",
+                referrer["id"],
                 user["id"],
             )
             if not changed.endswith("1"):
@@ -1549,7 +2176,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 )
                 return
             await self.db.set_session(event["sender_id"])
-            await self.send(event["chat_id"], "✅ کد معرف ثبت شد.", menu=main_menu())
+            await self.send(
+                event["chat_id"],
+                "✅ کد معرف ثبت شد.",
+                menu=await self.user_menu(event["sender_id"]),
+            )
         elif state == "card_receipt":
             if not str(data.get("payment_id", "")).isdigit():
                 await self.db.set_session(event["sender_id"])
@@ -1579,7 +2210,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 )
             except (TypeError, ValueError) as exc:
                 await self.db.set_session(event["sender_id"])
-                await self.send(event["chat_id"], f"❌ {exc}", menu=main_menu())
+                await self.send(
+                    event["chat_id"],
+                    f"❌ {exc}",
+                    menu=await self.user_menu(event["sender_id"]),
+                )
                 return
             await self.db.set_session(event["sender_id"])
             if not receipt:
@@ -1710,14 +2345,18 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 return
             if kind == "gift":
                 safe_value = checked_amount(safe_value, label="مبلغ کد هدیه")
-            await self.db.pool.execute(
-                """INSERT INTO promo_codes(code_type,code,value,max_uses)
-                   VALUES($1,upper($2),$3,$4)""",
-                kind,
-                code,
-                safe_value,
-                safe_max_uses,
-            )
+            try:
+                await self.db.pool.execute(
+                    """INSERT INTO promo_codes(code_type,code,value,max_uses)
+                       VALUES($1,upper($2),$3,$4)""",
+                    kind,
+                    code,
+                    safe_value,
+                    safe_max_uses,
+                )
+            except asyncpg.UniqueViolationError:
+                await self.send(event["chat_id"], "❌ این کد قبلاً ثبت شده است.")
+                return
             await self.db.set_session(event["sender_id"])
             await self.send(
                 event["chat_id"],
@@ -1806,40 +2445,6 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 f"✅ مبلغ {amount:,} تومان به کیف پول همه کاربران فعال اضافه شد.",
                 menu=admin_menu(),
             )
-        elif state == "admin_set_profit":
-            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
-                await self.db.set_session(event["sender_id"])
-                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
-                return
-            raw = (
-                event["text"]
-                .strip()
-                .replace("٪", "")
-                .replace("%", "")
-                .replace(",", "")
-            )
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                await self.send(
-                    event["chat_id"],
-                    "❌ فقط عدد بفرست (مثلاً 10).",
-                )
-                return
-            if not 1 <= value <= 200:
-                await self.send(
-                    event["chat_id"],
-                    "❌ درصد باید بین ۱ تا ۲۰۰ باشد.",
-                )
-                return
-            await self.db.set_setting("gem_profit_percent", str(value))
-            await self.db.set_session(event["sender_id"])
-            await self.send(
-                event["chat_id"],
-                f"✅ درصد سود بسته‌های جم به {value}٪ تغییر کرد.\n"
-                "برای اعمال روی قیمت‌ها، «🔄 بروزرسانی قیمت جم» را بزن.",
-                menu=admin_menu(),
-            )
         elif state == "admin_cred_setting":
             if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
                 await self.db.set_session(event["sender_id"])
@@ -1863,7 +2468,12 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     await self.send(event["chat_id"], "❌ درصد باید بین ۱ تا ۲۰۰ باشد.")
                     return
                 await self.db.set_setting(key, str(value))
-                msg = f"✅ {key} = {value}٪"
+                labels = {
+                    "gem_profit_percent": "جم با آیدی",
+                    "credential_weekly_profit_percent": "هفتگی",
+                    "credential_monthly_profit_percent": "ماهانه",
+                }
+                msg = f"✅ سود {labels.get(key, key)} = {value}٪"
             elif key.endswith("_cost_usd"):
                 try:
                     from decimal import Decimal, InvalidOperation
@@ -1882,8 +2492,43 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 await self.send(event["chat_id"], "❌ تنظیم نامعتبر.")
                 return
             await self.db.set_session(event["sender_id"])
-            await self.send(event["chat_id"], msg)
-            await self.credential_pricing_hub(event)
+            sync_note = ""
+            if key.endswith("_profit_percent"):
+                if key == "gem_profit_percent":
+                    try:
+                        result = await self.run_gem_price_sync_router()
+                        if result.get("ok"):
+                            sync_note = (
+                                f"\n🔄 قیمت جم با آیدی: {result.get('gem_updated', 0)} · "
+                                f"جم با اطلاعات: {result.get('cred_updated', 0)}"
+                            )
+                        else:
+                            sync_note = f"\n⚠️ sync قیمت: {result.get('error')}"
+                    except Exception:
+                        log.exception("Price sync after gem profit change failed")
+                        sync_note = "\n⚠️ sync قیمت انجام نشد."
+                else:
+                    sync = await self.sync_credential_prices_now()
+                    if sync and sync.get("ok"):
+                        sync_note = (
+                            f"\n🔄 قیمت فروش ({sync['updated']} محصول) با نرخ "
+                            f"{sync['rate']:,} تومان اعمال شد."
+                        )
+                    elif sync and sync.get("error"):
+                        sync_note = f"\n⚠️ قیمت فوری اعمال نشد: {sync['error']}"
+            elif key.endswith("_cost_usd"):
+                sync = await self.sync_credential_prices_now()
+                if sync and sync.get("ok"):
+                    sync_note = (
+                        f"\n🔄 قیمت فروش ({sync['updated']} محصول) اعمال شد."
+                    )
+                elif sync and sync.get("error"):
+                    sync_note = f"\n⚠️ قیمت فوری اعمال نشد: {sync['error']}"
+            await self.send(event["chat_id"], msg + sync_note)
+            if key.endswith("_profit_percent"):
+                await self.admin_pricing_home(event, with_menu=False)
+            else:
+                await self.admin_pricing_home(event, with_menu=False)
         elif state == "admin_broadcast":
             if not await self.db.is_admin(
                 event["sender_id"], self.config.admin_id
@@ -1918,10 +2563,91 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 menu=admin_menu(),
             )
 
+    async def admin_users_list(self, event, *, filter_key: str = "all"):
+        chat = event["chat_id"]
+        clauses = {
+            "all": "TRUE",
+            "balance": "balance>0",
+            "referral": "EXISTS(SELECT 1 FROM users child WHERE child.referred_by=users.id)",
+            "card": "card_verified",
+        }
+        titles = {
+            "all": "👥 همه کاربران",
+            "balance": "💰 کاربران با موجودی",
+            "referral": "👥 کاربران دارای زیرمجموعه",
+            "card": "💳 کاربران با کارت تأییدشده",
+        }
+        where = clauses.get(filter_key, "TRUE")
+        rows = await self.db.pool.fetch(
+            f"""SELECT id,display_name,rubika_id,balance,blocked,card_number
+                FROM users WHERE {where} ORDER BY id DESC LIMIT 20"""
+        )
+        if not rows:
+            await self.send(chat, "کاربری در این فیلتر پیدا نشد.")
+            return
+
+        def _user_label(r):
+            name = (r["display_name"] or "").strip()
+            line = (
+                f"{r['id']} | {name or '—'} | {r['rubika_id']} | {r['balance']:,} ت"
+                + (" 🚫" if r["blocked"] else "")
+            )
+            if filter_key == "card" and r.get("card_number"):
+                line += f" | ****{r['card_number'][-4:]}"
+            return line
+
+        total = await self.db.pool.fetchval(
+            f"SELECT count(*) FROM users WHERE {where}"
+        )
+        await self.send(
+            chat,
+            f"{titles.get(filter_key, '👥 کاربران')}\n"
+            f"نمایش {len(rows)} از {total:,}\n\n"
+            + "\n".join(_user_label(r) for r in rows)
+            + "\n\nبرای بن/آنبن روی دکمه‌ها بزن:",
+            buttons=inline(
+                [
+                    [
+                        ("admin_users", "👥 همه"),
+                        ("admin_users_balance", "💰 موجودی"),
+                    ],
+                    [
+                        ("admin_users_referral", "👥 زیرمجموعه"),
+                        ("admin_users_card", "💳 کارت"),
+                    ],
+                    *[
+                        [
+                            (
+                                f"admin_block:{r['id']}",
+                                ("🚫 بن " if not r["blocked"] else "✅ آنبن ")
+                                + str(r["id"]),
+                            )
+                        ]
+                        for r in rows
+                    ],
+                    [("admin_search", "🔎 جستجوی کاربر")],
+                ]
+            ),
+        )
+
     async def admin(self, event, action):
         chat = event["chat_id"]
+        if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+            await self.send(chat, "⛔️ دسترسی مدیر ندارید.")
+            return
+        state, _ = await self.db.session(event["sender_id"])
+        if (
+            state
+            and state.startswith("admin_")
+            and action not in {"admin_cancel_broadcast", "flow_cancel", "/admin"}
+            and not action.startswith(
+                ("admin_product_kind:", "admin_cred_plan:", "admin_product_")
+            )
+        ):
+            await self.db.set_session(event["sender_id"])
         if action == "/admin":
-            await self.send(chat, "🛠 پنل مدیریت اتومیک روبیکا", menu=admin_menu())
+            await self.open_admin_panel(event)
+            return
         elif action == "admin_stats":
             s = await self.db.stats()
             await self.send(
@@ -2016,7 +2742,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                                 f"🔐 جم با اطلاعات ({ready_cred})",
                             )
                         ],
-                        [("admin_cred_pricing", "💱 قیمت‌گذاری هفتگی/ماهانه")],
+                        [("admin_pricing_home", "📈 قیمت و سود")],
                         [("home", "🏠 بازگشت")],
                     ]
                 ),
@@ -2115,41 +2841,19 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                         "اطلاعات متنی و دکمه‌های بررسی همچنان معتبرند.",
                     )
         elif action == "admin_users":
-            rows = await self.db.pool.fetch(
-                """SELECT id,display_name,rubika_id,balance,blocked
-                   FROM users ORDER BY id LIMIT 20"""
-            )
-            if not rows:
-                await self.send(chat, "کاربری وجود ندارد.")
-                return
-            def _user_label(r):
-                name = (r["display_name"] or "").strip()
-                return (
-                    f"{r['id']} | {name or '—'} | {r['rubika_id']} | {r['balance']:,} ت"
-                    + (" 🚫" if r["blocked"] else "")
-                )
-            await self.send(
-                chat,
-                "👥 کاربران\n"
-                f"نمایش {len(rows)} کاربر از اول لیست (کل: "
-                f"{await self.db.pool.fetchval('SELECT count(*) FROM users')})\n\n"
-                + "\n".join(_user_label(r) for r in rows)
-                + "\n\nبرای بن/آنبن روی دکمه‌ها بزن:",
-                buttons=inline(
-                    [
-                        [
-                            (
-                                f"admin_block:{r['id']}",
-                                ("🚫 بن " if not r["blocked"] else "✅ آنبن ") + str(r["id"]),
-                            )
-                        ]
-                        for r in rows
-                    ]
-                ),
-            )
+            await self.admin_users_list(event, filter_key="all")
+        elif action == "admin_users_balance":
+            await self.admin_users_list(event, filter_key="balance")
+        elif action == "admin_users_referral":
+            await self.admin_users_list(event, filter_key="referral")
+        elif action == "admin_users_card":
+            await self.admin_users_list(event, filter_key="card")
         elif action == "admin_support":
             rows = await self.db.pool.fetch(
-                "SELECT id,user_id,department FROM tickets WHERE status='open' ORDER BY updated_at DESC LIMIT 30"
+                """SELECT id,user_id,department FROM tickets
+                   WHERE status='open'
+                     AND COALESCE(category,'bot')<>'credential'
+                   ORDER BY updated_at DESC LIMIT 30"""
             )
             buttons = []
             for row in rows[:12]:
@@ -2255,49 +2959,42 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     if product_lines
                     else "برای نمایش هزینه واقعی، cost_usd محصولات را تنظیم کن."
                 )
-                + "\n\nبروزرسانی خودکار قیمت جم هر ۲۴ ساعت انجام می‌شود.",
+                + "\n\nبروزرسانی خودکار قیمت جم و جم با اطلاعات هر ۲۴ ساعت انجام می‌شود "
+                "(جم با اطلاعات: سود ۴۰٪ هفتگی/ماهانه).",
                 buttons=inline(
                     [
                         [
                             (
-                                "admin_sync_prices",
-                                "🔄 بروزرسانی فوری قیمت جم (نرخ لحظه‌ای)",
+                                "admin_pricing_sync",
+                                "🔄 همگام‌سازی قیمت‌ها",
                             )
                         ],
+                        [("admin_pricing_home", "📈 قیمت و سود")],
                         [("admin_finance", "💳 تنظیمات مالی")],
                     ]
                 ),
             )
-        elif action == "admin_sync_prices":
-            await self.send(chat, "⏳ در حال دریافت نرخ لحظه‌ای دلار و کاتالوگ G2Bulk…")
-            try:
-                result = await self.run_gem_price_sync_router()
-            except Exception as exc:
-                log.exception("Manual price sync failed")
-                await self.send(chat, f"❌ خطا در بروزرسانی: {exc}")
-                return
-            if not result.get("ok"):
-                await self.send(chat, f"❌ بروزرسانی انجام نشد:\n{result.get('error')}")
-                return
-            await self.send(
-                chat,
-                f"✅ بروزرسانی قیمت جم انجام شد.\n"
-                f"تعداد به‌روزرسانی‌شده: {result['updated']}\n"
-                f"درصد سود: {result['profit_percent']}٪\n"
-                f"نرخ دلار لحظه‌ای: {result['rate']:,} تومان ({result['source']})",
-                menu=admin_menu(),
-            )
+        elif action == "admin_pricing_home":
+            await self.admin_pricing_home(event, with_menu=True)
+        elif action in {"admin_sync_prices", "admin_profit_sync", "admin_pricing_sync"}:
+            await self.admin_pricing_sync(event)
         elif action == "admin_set_profit":
-            current = await self.gem_profit_percent()
+            await self.admin_pricing_home(event, with_menu=True)
+        elif action.startswith("admin_cred_plan:"):
+            plan = action.removeprefix("admin_cred_plan:")
+            if plan not in {"weekly", "monthly"}:
+                await self.send(chat, "❌ دوره نامعتبر است.")
+                return
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_product_add_title",
+                {"kind": "gem_credentials", "cred_plan": plan},
+            )
             await self.send(
                 chat,
-                f"📈 درصد سود بسته‌های جم\n"
-                f"درصد فعلی: {current}٪\n\n"
-                "مقدار جدید را بفرست (بین ۱ تا ۲۰۰):\n"
-                "مثال: `10` یعنی ۱۰٪ سود",
-                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+                f"عنوان محصول {'هفتگی' if plan == 'weekly' else 'ماهانه'} را بفرست:",
+                buttons=inline([[("flow_cancel", "✖️ انصراف")]]),
             )
-            await self.db.set_session(event["sender_id"], "admin_set_profit", {})
         elif action == "admin_products":
             await self.products_manage_home(event)
         elif action == "admin_product_add":
@@ -2374,6 +3071,13 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             if cid.isdigit():
                 await self.db.pool.execute(
                     "UPDATE categories SET active=false WHERE id=$1", int(cid)
+                )
+                await self.categories_manage_home(event)
+        elif action.startswith("admin_category_move:"):
+            parts = action.removeprefix("admin_category_move:").split(":")
+            if len(parts) == 2 and parts[0].isdigit():
+                await self.db.move_catalogue_item(
+                    "categories", int(parts[0]), parts[1]
                 )
                 await self.categories_manage_home(event)
         elif action == "admin_finance":
@@ -2459,9 +3163,8 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                         [("admin_edit:card_holder", "✏️ نام دارنده")],
                         [("admin_edit:card_bank", "✏️ بانک")],
                         [("admin_edit:usd_toman_rate", "✏️ نرخ دلار")],
-                        [("admin_fx", "💵 نرخ و سود")],
-                        [("admin_sync_prices", "🔄 بروزرسانی قیمت جم")],
-                        [("admin_cred_pricing", "💱 قیمت‌گذاری جم با اطلاعات")],
+                        [("admin_pricing_home", "📈 قیمت و سود")],
+                        [("admin_pricing_sync", "🔄 sync جم با اطلاعات")],
                     ]
                 ),
             )
@@ -2967,6 +3670,21 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                    WHERE id=$1 AND status='open'""",
                 ticket_id,
             )
+            if changed.endswith("1"):
+                ticket_row = await self.db.pool.fetchrow(
+                    "SELECT user_id FROM tickets WHERE id=$1", ticket_id
+                )
+                if ticket_row:
+                    user_row = await self.db.pool.fetchrow(
+                        "SELECT chat_id FROM users WHERE id=$1",
+                        ticket_row["user_id"],
+                    )
+                    if user_row and user_row["chat_id"]:
+                        await self.api.send_message(
+                            user_row["chat_id"],
+                            f"✅ تیکت #{ticket_id} بسته شد.\n"
+                            "اگر سوال دیگری داری، از منوی پشتیبانی تیکت جدید بساز.",
+                        )
             await self.send(
                 chat,
                 "✅ تیکت بسته شد." if changed.endswith("1") else "این تیکت قبلاً بسته شده است.",
@@ -2996,12 +3714,37 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 await self.send(chat, f"✅ سفارش #{order_id} تکمیل شد.")
                 return
             row = await self.db.pool.fetchrow(
+                """SELECT o.user_id, p.kind, f.status AS fulfillment_status
+                   FROM orders o
+                   JOIN order_items i ON i.order_id=o.id
+                   JOIN products p ON p.id=i.product_id
+                   LEFT JOIN fulfillments f ON f.order_id=o.id
+                   WHERE o.id=$1 AND o.status IN ('paid','processing')
+                   LIMIT 1""",
+                order_id,
+            )
+            if not row:
+                await self.send(chat, "سفارش قابل تکمیل نیست.")
+                return
+            if row["kind"] == "gem" and row["fulfillment_status"] in {
+                "PENDING",
+                "PROCESSING",
+                "SUBMITTING",
+                "SUBMIT_UNKNOWN",
+            }:
+                await self.send(
+                    chat,
+                    "⛔️ این سفارش جم خودکار است و هنوز در G2Bulk در جریان است؛ "
+                    "تکمیل دستی مجاز نیست.",
+                )
+                return
+            updated = await self.db.pool.fetchrow(
                 """UPDATE orders SET status='completed'
                    WHERE id=$1 AND status IN ('paid','processing')
                    RETURNING user_id""",
                 order_id,
             )
-            if not row:
+            if not updated:
                 await self.send(chat, "سفارش قابل تکمیل نیست.")
                 return
             await self.db.pool.execute(
@@ -3011,7 +3754,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             )
             user = await self.db.pool.fetchrow(
                 "SELECT chat_id FROM users WHERE id=$1",
-                row["user_id"],
+                updated["user_id"],
             )
             await self.api.send_message(
                 user["chat_id"],
@@ -3316,7 +4059,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     "SELECT 1 FROM users WHERE id=$1", target_id
                 )
                 if not exists:
-                    raise ValueError("کاربر پیدا نشد؛ شناسه داخلی را از /users_balance بگیر.")
+                    raise ValueError("کاربر پیدا نشد؛ شناسه داخلی را از بخش «کاربران» بگیر.")
                 async with self.db.pool.acquire() as conn:
                     async with conn.transaction():
                         await conn.execute(
@@ -3478,38 +4221,140 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 "❌ عملیات انجام نشد؛ ورودی یا وضعیت فعلی را بررسی کن.",
             )
 
-    async def gem_profit_percent(self) -> int:
-        """درصد سود بسته‌های جم؛ از تنظیم دیتابیس (پیش‌فرض ۷)."""
-        raw = await self.db.setting("gem_profit_percent", "7")
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            value = 7
-        return max(1, min(200, value))
-
-    async def run_gem_price_sync_router(self):
-        """بروزرسانی دستی قیمت جم با نرخ لحظه‌ای دلار + کاتالوگ G2Bulk."""
-        rate = await usd_toman_rate(
-            await self.db.setting("usd_toman_rate", "")
-        )
+    async def sync_credential_prices_now(self, *, force=True):
+        """فقط جم با اطلاعات — $1.328/$6.64 × نرخ Nobitex/fallback."""
+        manual = await self.db.setting("usd_toman_rate", "")
+        rate = await usd_toman_rate(manual, force=True)
         if not rate.get("ok"):
             return {"ok": False, "error": rate.get("error")}
-        catalogue = await self.g2.catalogue()
-        if not catalogue.get("ok"):
-            return {"ok": False, "error": catalogue.get("error")}
-        profit_percent = await self.gem_profit_percent()
-        updated = await self.db.sync_gem_prices_from_catalogue(
-            items=catalogue["items"],
-            rate_value=rate["rate"],
-            profit_percent=profit_percent,
+        if rate.get("source") == "nobitex_usdtirt_best_ask":
+            await self.db.set_setting("usd_toman_rate", str(rate["rate"]))
+        updated = await self.db.sync_credential_prices(rate["rate"], force=force)
+        await self.db.touch_credential_price_last_sync()
+        cfg = await self.db.get_credential_pricing_config()
+        from supplier import compute_gem_sale_price
+
+        weekly_price = await compute_gem_sale_price(
+            cfg["weekly_cost"], rate["rate"], cfg["weekly_profit"]
+        )
+        monthly_price = await compute_gem_sale_price(
+            cfg["monthly_cost"], rate["rate"], cfg["monthly_profit"]
         )
         return {
             "ok": True,
             "updated": updated,
             "rate": rate["rate"],
             "source": rate["source"],
-            "profit_percent": profit_percent,
+            "fallback": bool(rate.get("fallback")),
+            "weekly_profit": cfg["weekly_profit"],
+            "monthly_profit": cfg["monthly_profit"],
+            "weekly_cost": str(cfg["weekly_cost"]),
+            "monthly_cost": str(cfg["monthly_cost"]),
+            "weekly_price": weekly_price,
+            "monthly_price": monthly_price,
         }
+
+    def format_credential_sync_report(self, sync: dict) -> str:
+        lines = [
+            "✅ جم با اطلاعات — قیمت‌ها اعمال شد.",
+            "(مستقل از G2Bulk · فقط $ × نرخ لحظه‌ای × سود)",
+            f"بسته‌های به‌روز: {sync.get('updated', 0)}",
+            f"نرخ دلار: {sync.get('rate', 0):,} ت ({sync.get('source', '—')})",
+            (
+                f"سود: هفتگی {sync.get('weekly_profit', 40)}٪ · "
+                f"ماهانه {sync.get('monthly_profit', 40)}٪"
+            ),
+            (
+                f"بهای خالص: {sync.get('weekly_cost', '1.328')} / "
+                f"{sync.get('monthly_cost', '6.64')} USD"
+            ),
+        ]
+        if sync.get("weekly_price") is not None:
+            lines.append(
+                f"📅 فروش هفتگی: {int(sync['weekly_price']):,} ت · "
+                f"📆 فروش ماهانه: {int(sync['monthly_price']):,} ت"
+            )
+        if sync.get("fallback"):
+            lines.append("⚠️ نرخ از fallback دستی بود.")
+        return "\n".join(lines)
+
+    async def gem_profit_percent(self) -> int:
+        """درصد سود بسته‌های جم؛ از تنظیم دیتابیس (پیش‌فرض ۱۰)."""
+        raw = await self.db.setting("gem_profit_percent", "10")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 10
+        return max(1, min(200, value))
+
+    async def _format_price_sync_report(self, result: dict) -> str:
+        lines = [
+            "✅ بروزرسانی قیمت انجام شد.",
+            f"جم با آیدی: {result.get('gem_updated', 0)} مورد",
+            f"جم با اطلاعات: {result.get('cred_updated', 0)} مورد",
+            f"سود جم با آیدی: {result.get('profit_percent', '—')}٪",
+            (
+                f"سود هفتگی/ماهانه: {result.get('weekly_profit', 40)}٪ / "
+                f"{result.get('monthly_profit', 40)}٪"
+            ),
+            f"نرخ دلار: {result.get('rate', 0):,} تومان ({result.get('source', '—')})",
+        ]
+        if result.get("fallback"):
+            lines.append("⚠️ نرخ از fallback دستی استفاده شد.")
+        cat_err = str(result.get("catalogue_error") or "").strip()
+        if cat_err:
+            lines.append(f"⚠️ کاتالوگ G2Bulk: {cat_err}")
+        total = int(result.get("updated") or 0)
+        if total == 0:
+            lines.append(
+                "ℹ️ هیچ ردیفی تغییر نکرد (قیمت‌ها از قبل همین بودند یا SKU جم با آیدی "
+                "با کاتالوگ G2Bulk مطابقت ندارد)."
+            )
+        return "\n".join(lines)
+
+    async def _run_price_sync(self, *, force_rate=False):
+        manual = await self.db.setting("usd_toman_rate", "")
+        rate = await usd_toman_rate(manual, force=force_rate)
+        if not rate.get("ok"):
+            return {"ok": False, "error": rate.get("error")}
+        if rate.get("source") == "nobitex_usdtirt_best_ask":
+            await self.db.set_setting("usd_toman_rate", str(rate["rate"]))
+        gem_updated = 0
+        catalogue = await self.g2.catalogue()
+        catalogue_error = ""
+        if catalogue.get("ok"):
+            profit_percent = await self.gem_profit_percent()
+            gem_updated = await self.db.sync_gem_prices_from_catalogue(
+                items=catalogue["items"],
+                rate_value=rate["rate"],
+                profit_percent=profit_percent,
+            )
+        else:
+            catalogue_error = catalogue.get("error") or "دریافت کاتالوگ G2Bulk ناموفق بود."
+        cred_cfg = await self.db.get_credential_pricing_config()
+        cred_updated = await self.db.sync_credential_prices(
+            rate["rate"], force=force_rate
+        )
+        await self.db.touch_price_last_sync()
+        return {
+            "ok": True,
+            "updated": gem_updated + cred_updated,
+            "gem_updated": gem_updated,
+            "cred_updated": cred_updated,
+            "rate": rate["rate"],
+            "source": rate["source"],
+            "fallback": bool(rate.get("fallback")),
+            "profit_percent": await self.gem_profit_percent(),
+            "weekly_profit": cred_cfg["weekly_profit"],
+            "monthly_profit": cred_cfg["monthly_profit"],
+            "weekly_cost": str(cred_cfg["weekly_cost"]),
+            "monthly_cost": str(cred_cfg["monthly_cost"]),
+            "catalogue_error": catalogue_error,
+        }
+
+    async def run_gem_price_sync_router(self):
+        """بروزرسانی دستی قیمت جم با آیدی و جم با اطلاعات (مثل تلگرام)."""
+        return await self._run_price_sync(force_rate=True)
 
     async def review_join(self, admin_id, user_id, approved):
         status = "approved" if approved else "rejected"
@@ -3577,7 +4422,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                             """SELECT 1 FROM payments
                                WHERE order_id=$1 AND id<>$2
                                  AND provider='gateway' AND authority IS NOT NULL
-                                 AND status IN ('pending','cancelled','expired')
+                                 AND status='pending' AND expires_at>now()
                                LIMIT 1""",
                             receipt["order_id"],
                             receipt["payment_id"],
@@ -3593,19 +4438,45 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     )
                     if receipt["purpose"] == "wallet":
                         reference = f"receipt:{receipt_id}"
-                        await conn.execute(
+                        inserted = await conn.fetchval(
                             """INSERT INTO wallet_ledger(user_id,amount,entry_type,reference)
-                               VALUES($1,$2,'card_charge',$3)""",
+                               VALUES($1,$2,'card_charge',$3)
+                               ON CONFLICT(reference) DO NOTHING RETURNING id""",
                             receipt["user_id"],
                             receipt["amount"],
                             reference,
                         )
-                        await conn.execute(
-                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
-                            receipt["amount"],
-                            receipt["user_id"],
-                        )
+                        if inserted:
+                            await conn.execute(
+                                "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                                receipt["amount"],
+                                receipt["user_id"],
+                            )
                     else:
+                        _, due = order_amounts(
+                            order["total_amount"],
+                            order["discount_amount"],
+                            order["wallet_paid"],
+                        )
+                        if int(receipt["amount"]) != due:
+                            raise ValueError(
+                                "مبلغ رسید با مانده سفارش مطابقت ندارد."
+                            )
+                        await conn.execute(
+                            """UPDATE receipts SET status='rejected',reviewed_at=now()
+                               WHERE payment_id IN (
+                                 SELECT id FROM payments
+                                 WHERE order_id=$1 AND id<>$2
+                               ) AND status='pending'""",
+                            receipt["order_id"],
+                            receipt["payment_id"],
+                        )
+                        await conn.execute(
+                            """UPDATE payments SET status='cancelled'
+                               WHERE order_id=$1 AND id<>$2 AND status='pending'""",
+                            receipt["order_id"],
+                            receipt["payment_id"],
+                        )
                         changed = await conn.execute(
                             """UPDATE orders SET status='paid',payable_amount=0,
                                inventory_reserved=false,
@@ -3657,9 +4528,16 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         user = await self.db.pool.fetchrow(
             "SELECT chat_id FROM users WHERE id=$1", receipt["user_id"]
         )
-        await self.api.send_message(
-            user["chat_id"],
-            "✅ رسید تأیید و پرداخت ثبت شد."
-            if approved
-            else "❌ رسید رد شد؛ با پشتیبانی تماس بگیر.",
-        )
+        if approved:
+            if receipt["purpose"] == "wallet":
+                msg = (
+                    f"✅ شارژ کیف پول به مبلغ {receipt['amount']:,} تومان تأیید شد."
+                )
+            else:
+                msg = (
+                    f"✅ رسید تأیید و پرداخت سفارش #{receipt['order_id']} ثبت شد.\n"
+                    f"مبلغ: {receipt['amount']:,} تومان"
+                )
+        else:
+            msg = "❌ رسید رد شد؛ با پشتیبانی تماس بگیر."
+        await self.api.send_message(user["chat_id"], msg)

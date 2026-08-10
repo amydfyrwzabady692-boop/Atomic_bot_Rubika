@@ -238,6 +238,19 @@ class DatabaseTests(unittest.TestCase):
         # Admin chat_keypad labels map to actions for clients that send text.
         self.assertIn('"👥 کاربران": "admin_users"', handle_source)
         self.assertIn('"💳 بخش مالی": "admin_finance"', handle_source)
+        self.assertIn('"💳 امور مالی": "admin_finance"', handle_source)
+        self.assertIn('"🎧 پشتیبانی": "support"', handle_source)
+        self.assertIn('"🎧 تیکت‌های پشتیبانی": "admin_support"', handle_source)
+        self.assertIn("flow_cancel", handle_source)
+        self.assertIn("support_cancel", handle_source)
+        self.assertIn("_user_label_map", handle_source)
+        self.assertIn("pay_check:", handle_source)
+        self.assertIn("order_pay:", handle_source)
+        self.assertIn("_delivery_preflight", handle_source)
+        self.assertIn("rubika_id=$1", state_source)
+        self.assertIn("admin_cred_plan:", admin_source)
+        self.assertIn("NOTIFYING", (ROOT / "main.py").read_text(encoding="utf-8"))
+        self.assertIn("admin_users_balance", admin_source)
         # Interactive charge flows exist.
         self.assertIn("admin_charge", admin_source)
         self.assertIn("admin_charge_one", state_source)
@@ -293,7 +306,8 @@ class KeyboardTests(unittest.TestCase):
         ]
         self.assertIn("🎮 محصولات فری‌فایر", labels)
         self.assertIn("🛍 فروشگاه اکانت", labels)
-        self.assertIn("🎧 پشتیبانی", labels)
+        self.assertIn("📚 راهنما", labels)
+        self.assertIn("🆔 شناسه من", labels)
 
     def test_link_button_uses_rubika_url_button_shape(self):
         value = link_button(
@@ -327,6 +341,16 @@ class KeyboardTests(unittest.TestCase):
         self.assertIn('action.startswith("admin_")', handle_source)
         self.assertIn("if is_admin:", handle_source)
         self.assertEqual(Router.pretty_card("6037 9912-3456 7893"), "6037991234567893")
+        self.assertIn("send_card_transfer_messages", source)
+        self.assertIn("format_credential_sync_report", source)
+        self.assertIn("sync_credential_prices_now", source)
+
+    def test_credential_plan_resolution(self):
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        self.assertIn("sync_credential_prices", database_source)
+        self.assertIn("1.328", database_source)
+        self.assertIn("6.64", database_source)
+        self.assertIn("touch_credential_price_last_sync", database_source)
 
 
 class SchemaTests(unittest.TestCase):

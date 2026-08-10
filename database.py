@@ -3,6 +3,8 @@ from pathlib import Path
 
 import asyncpg
 
+from payment_safety import order_amounts
+
 
 class Database:
     def __init__(self, dsn: str):
@@ -14,6 +16,20 @@ class Database:
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         async with self.pool.acquire() as conn:
             await conn.execute(schema)
+            await self._migrate_credential_kind_once(conn)
+
+    async def _migrate_credential_kind_once(self, conn):
+        """یک‌بار در استارت؛ نه در هر sync (جلوگیری از crash)."""
+        try:
+            await conn.execute(
+                "ALTER TABLE products DROP CONSTRAINT IF EXISTS products_kind_check"
+            )
+            await conn.execute(
+                """ALTER TABLE products ADD CONSTRAINT products_kind_check
+                   CHECK (kind IN ('gem','sense_mobile','sense_pc','store','gem_credentials'))"""
+            )
+        except Exception:
+            pass
 
     async def close(self):
         if self.pool:
@@ -225,6 +241,14 @@ class Database:
                     )
                 if old_orders:
                     old_ids = [row["id"] for row in old_orders]
+                    await conn.execute(
+                        """UPDATE payments SET purpose='wallet',order_id=NULL
+                           WHERE order_id=ANY($1::bigint[])
+                             AND provider='gateway' AND authority IS NOT NULL
+                             AND status IN ('pending','expired','cancelled','rejected')
+                             AND purpose='order'""",
+                        old_ids,
+                    )
                     await conn.execute(
                         """UPDATE receipts SET status='rejected',reviewed_at=now()
                            WHERE payment_id IN (
@@ -479,32 +503,14 @@ class Database:
                                 "رسید این سفارش در انتظار بررسی است و "
                                 "روش پرداخت قابل تغییر نیست."
                             )
-                        # Auto-cancel the stale gateway so the user can
-                        # retry with a fresh link.  Refund the amount
-                        # only when it is a real positive value.
-                        refund_amount = int(
-                            protected_wallet_payment.get("amount") or 0
-                        )
+                        # Auto-cancel the stale gateway link so the user can
+                        # retry with a fresh one. Never credit the wallet here:
+                        # a pending link is not a verified payment.
                         await conn.execute(
                             """UPDATE payments SET status='cancelled'
                                WHERE id=$1""",
                             protected_wallet_payment["id"],
                         )
-                        if refund_amount > 0:
-                            await conn.execute(
-                                """INSERT INTO wallet_ledger(
-                                     user_id,amount,entry_type,reference
-                                   ) VALUES($1,$2,'gateway_cancel',$3)
-                                   ON CONFLICT(reference) DO NOTHING""",
-                                user_id,
-                                refund_amount,
-                                f"auto-cancel-wallet:{protected_wallet_payment['id']}",
-                            )
-                            await conn.execute(
-                                "UPDATE users SET balance=balance+$1 WHERE id=$2",
-                                refund_amount,
-                                user_id,
-                            )
                     await conn.execute(
                         """UPDATE payments SET status='cancelled'
                            WHERE user_id=$1 AND purpose='wallet'
@@ -627,14 +633,21 @@ class Database:
                     return payment, False
                 if (
                     payment["provider"] != "gateway"
-                    or payment["status"] not in {"pending", "expired", "cancelled"}
+                    or payment["status"]
+                    in {"pending", "expired", "cancelled", "rejected"}
                 ):
                     raise ValueError("پرداخت نامعتبر است.")
+                order = None
+                order_status = None
                 if payment["purpose"] == "order":
-                    order_status = await conn.fetchval(
-                        "SELECT status FROM orders WHERE id=$1 FOR UPDATE",
+                    order = await conn.fetchrow(
+                        """SELECT status,total_amount,discount_amount,wallet_paid
+                           FROM orders WHERE id=$1 FOR UPDATE""",
                         payment["order_id"],
                     )
+                    if not order:
+                        raise ValueError("سفارش پیدا نشد.")
+                    order_status = order["status"]
                 payment = await conn.fetchrow(
                     "SELECT * FROM payments WHERE id=$1 FOR UPDATE",
                     payment["id"],
@@ -646,7 +659,40 @@ class Database:
                         raise ValueError("شناسه مرجع با پرداخت تأییدشده مطابقت ندارد.")
                     return payment, False
                 if payment["purpose"] == "order" and order_status != "pending":
-                    raise ValueError("سفارش قبلاً پرداخت یا بسته شده است.")
+                    await conn.execute(
+                        """UPDATE payments SET status='verified',ref_id=$1,
+                           verified_at=now(),purpose='wallet',order_id=NULL
+                           WHERE id=$2""",
+                        ref_id,
+                        payment["id"],
+                    )
+                    reference = f"gateway:{authority}"
+                    inserted = await conn.fetchval(
+                        """INSERT INTO wallet_ledger(user_id,amount,entry_type,reference)
+                           VALUES($1,$2,'gateway_charge',$3)
+                           ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                        payment["user_id"],
+                        payment["amount"],
+                        reference,
+                    )
+                    if inserted:
+                        await conn.execute(
+                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                            payment["amount"],
+                            payment["user_id"],
+                        )
+                    payment = await conn.fetchrow(
+                        "SELECT * FROM payments WHERE id=$1", payment["id"]
+                    )
+                    return payment, True
+                if payment["purpose"] == "order":
+                    _, due = order_amounts(
+                        order["total_amount"],
+                        order["discount_amount"],
+                        order["wallet_paid"],
+                    )
+                    if int(payment["amount"]) != due:
+                        raise ValueError("مبلغ پرداخت با مانده سفارش مطابقت ندارد.")
                 await conn.execute(
                     """UPDATE payments SET status='verified',ref_id=$1,verified_at=now()
                        WHERE id=$2""",
@@ -720,7 +766,7 @@ class Database:
                     """SELECT 1 FROM payments p
                        WHERE p.order_id=$1 AND (
                          (p.provider='gateway' AND p.authority IS NOT NULL
-                          AND p.status IN ('pending','cancelled','expired'))
+                          AND p.status='pending' AND p.expires_at>now())
                          OR EXISTS (
                            SELECT 1 FROM receipts r
                            WHERE r.payment_id=p.id AND r.status='pending'
@@ -806,7 +852,7 @@ class Database:
                     """SELECT 1 FROM payments
                        WHERE order_id=$1 AND provider='gateway'
                          AND authority IS NOT NULL
-                         AND status IN ('pending','cancelled','expired')
+                         AND status='pending' AND expires_at>now()
                        LIMIT 1""",
                     order_id,
                 )
@@ -822,6 +868,14 @@ class Database:
                         "این سفارش لینک درگاه یا رسیدِ در انتظار دارد و تا تعیین "
                         "نتیجه پرداخت قابل لغو نیست."
                     )
+                await conn.execute(
+                    """UPDATE payments SET purpose='wallet',order_id=NULL
+                       WHERE order_id=$1 AND provider='gateway'
+                         AND authority IS NOT NULL
+                         AND status IN ('pending','expired','cancelled','rejected')
+                         AND purpose='order'""",
+                    order_id,
+                )
                 refunded = int(order["wallet_paid"])
                 if refunded:
                     reference = f"cancel-order:{order_id}:wallet-refund"
@@ -923,7 +977,7 @@ class Database:
                            SELECT 1 FROM payments p
                            WHERE p.order_id=o.id AND p.provider='gateway'
                              AND p.authority IS NOT NULL
-                             AND p.status IN ('pending','cancelled','expired')
+                             AND p.status='pending' AND p.expires_at>now()
                          )
                          AND NOT EXISTS (
                            SELECT 1 FROM payments p
@@ -933,6 +987,14 @@ class Database:
                        FOR UPDATE OF o"""
                 )
                 for order in rows:
+                    await conn.execute(
+                        """UPDATE payments SET purpose='wallet',order_id=NULL
+                           WHERE order_id=$1 AND provider='gateway'
+                             AND authority IS NOT NULL
+                             AND status IN ('pending','expired','cancelled','rejected')
+                             AND purpose='order'""",
+                        order["id"],
+                    )
                     refunded = int(order["wallet_paid"])
                     if refunded:
                         reference = f"expire-order:{order['id']}:wallet-refund"
@@ -1355,41 +1417,99 @@ class Database:
             "monthly_profit": await _profit("credential_monthly_profit_percent"),
         }
 
-    async def sync_credential_prices(self, rate_value) -> int:
-        """به‌روزرسانی قیمت فروش بسته‌های gem_credentials از بهای دلاری + سود."""
+    async def credential_products_admin(self):
+        return await self.pool.fetch(
+            """SELECT id,title,price,amount,supplier_sku,active,supplier_cost_usd
+               FROM products WHERE kind='gem_credentials' AND active
+               ORDER BY amount,id"""
+        )
+
+    async def sync_credential_prices(self, rate_value, *, force=False) -> int:
+        """قیمت هفتگی/ماهانه = بهای دلاری ثابت × نرخ لحظه‌ای × (1+سود٪).
+
+        کاملاً مستقل از G2Bulk.
+        """
         from supplier import compute_gem_sale_price
 
         cfg = await self.get_credential_pricing_config()
-        mapping = (
-            ("cred_weekly", cfg["weekly_cost"], cfg["weekly_profit"]),
-            ("cred_monthly", cfg["monthly_cost"], cfg["monthly_profit"]),
+        plans = (
+            (
+                "cred_weekly",
+                60,
+                "📅 عضویت هفتگی (جم با اطلاعات)",
+                cfg["weekly_cost"],
+                cfg["weekly_profit"],
+            ),
+            (
+                "cred_monthly",
+                300,
+                "📆 عضویت ماهانه (جم با اطلاعات)",
+                cfg["monthly_cost"],
+                cfg["monthly_profit"],
+            ),
         )
         updated = 0
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                for sku, cost, profit in mapping:
-                    price = await compute_gem_sale_price(cost, rate_value, profit)
-                    result = await conn.execute(
-                        """UPDATE products
-                           SET supplier_cost_usd=$1, price=$2, amount=CASE
-                             WHEN supplier_sku='cred_weekly' THEN 60
-                             WHEN supplier_sku='cred_monthly' THEN 300
-                             ELSE amount END
-                           WHERE kind='gem_credentials' AND supplier_sku=$3 AND active
-                             AND (price IS DISTINCT FROM $2
-                                  OR supplier_cost_usd::text IS DISTINCT FROM $1)""",
-                        str(cost),
-                        int(price),
-                        sku,
+                for sku, amount, title, cost, profit in plans:
+                    new_price = await compute_gem_sale_price(
+                        cost, rate_value, profit
                     )
-                    try:
-                        updated += int(str(result).split()[-1])
-                    except (ValueError, IndexError):
-                        pass
-                await conn.execute(
-                    """INSERT INTO settings(key,value,updated_at)
-                       VALUES('credential_price_last_sync',now()::text,now())
-                       ON CONFLICT(key) DO UPDATE
-                       SET value=EXCLUDED.value,updated_at=now()"""
-                )
+                    row = await conn.fetchrow(
+                        """SELECT id, price FROM products
+                           WHERE active AND kind='gem_credentials'
+                             AND (supplier_sku=$1 OR amount=$2)
+                           ORDER BY id LIMIT 1""",
+                        sku,
+                        amount,
+                    )
+                    cost_text = str(cost)
+                    if row:
+                        if not force and int(row["price"]) == int(new_price):
+                            continue
+                        await conn.execute(
+                            """UPDATE products
+                               SET title=$1, description='تحویل دستی — جم با اطلاعات',
+                                   amount=$2, supplier_sku=$3, supplier_cost_usd=$4,
+                                   price=$5, stock=GREATEST(stock, 1), active=true
+                               WHERE id=$6""",
+                            title,
+                            amount,
+                            sku,
+                            cost_text,
+                            int(new_price),
+                            row["id"],
+                        )
+                    else:
+                        await conn.execute(
+                            """INSERT INTO products(
+                                   kind,title,description,amount,supplier_sku,
+                                   supplier_cost_usd,price,stock,active
+                               ) VALUES (
+                                   'gem_credentials',$1,'تحویل دستی — جم با اطلاعات',
+                                   $2,$3,$4,$5,9999,true
+                               )""",
+                            title,
+                            amount,
+                            sku,
+                            cost_text,
+                            int(new_price),
+                        )
+                    updated += 1
         return updated
+
+    async def touch_price_last_sync(self):
+        await self.pool.execute(
+            """INSERT INTO settings(key,value,updated_at)
+               VALUES('gem_price_last_sync',now()::text,now())
+               ON CONFLICT(key) DO UPDATE
+               SET value=EXCLUDED.value,updated_at=now()"""
+        )
+
+    async def touch_credential_price_last_sync(self):
+        await self.pool.execute(
+            """INSERT INTO settings(key,value,updated_at)
+               VALUES('credential_price_last_sync',now()::text,now())
+               ON CONFLICT(key) DO UPDATE
+               SET value=EXCLUDED.value,updated_at=now()"""
+        )

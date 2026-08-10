@@ -28,6 +28,7 @@ def main_menu(*, is_admin: bool = False, is_cred_staff: bool = False) -> dict:
         [("orders", "📦 سفارش‌های من"), ("account", "👤 حساب من")],
         [("store", "🛍 فروشگاه اکانت"), ("sense", "🎯 پک سنس")],
         [("promo", "🎁 ثبت کد"), ("support", "🎧 پشتیبانی")],
+        [("help", "📚 راهنما"), ("myid", "🆔 شناسه من")],
     ]
     if is_admin:
         rows.append([("admin_panel", "🛠 پنل مدیریت")])
@@ -47,16 +48,22 @@ def credential_staff_menu() -> dict:
 
 
 def admin_menu() -> dict:
+    """صفحه اول پنل: سود جم + هفتگی/ماهانه + قیمت‌گذاری جم با اطلاعات."""
     return keypad(
         [
-            [("admin_ops", "🚨 مرکز عملیات"), ("admin_stats", "📊 آمار کلی")],
-            [("admin_users", "👥 کاربران"), ("admin_charge", "💰 شارژ کاربر")],
-            [("admin_shop", "🛍 مدیریت فروشگاه"), ("admin_finance", "💳 امور مالی")],
-            [("admin_receipts", "🧾 رسیدها"), ("admin_orders", "📦 سفارش‌ها")],
-            [("admin_support", "🎧 پشتیبانی"), ("admin_broadcast", "📣 پیام همگانی")],
-            [("admin_sync_prices", "🔄 بروزرسانی قیمت جم"), ("admin_fx", "💵 نرخ و سود")],
-            [("admin_set_profit", "📈 درصد سود جم"), ("admin_settings", "⚙️ تنظیمات")],
-            [("admin_search", "🔎 جستجو"), ("admin_admins", "👮 مدیریت مدیران")],
+            [("admin_set_gem_id_profit", "📈 درصد سود جم")],
+            [
+                ("admin_cred_set_weekly_profit", "📅 سود هفتگی"),
+                ("admin_cred_set_monthly_profit", "📆 سود ماهانه"),
+            ],
+            [("admin_pricing_home", "💱 قیمت‌گذاری جم با اطلاعات")],
+            [("admin_pricing_sync", "🔄 همگام‌سازی قیمت‌ها")],
+            [("admin_ops", "🚨 مرکز عملیات"), ("admin_stats", "📊 آمار")],
+            [("admin_users", "👥 کاربران"), ("admin_shop", "🛍 فروشگاه")],
+            [("admin_finance", "💳 امور مالی"), ("admin_orders", "📦 سفارش‌ها")],
+            [("admin_receipts", "🧾 رسیدها"), ("admin_support", "🎧 پشتیبانی")],
+            [("admin_broadcast", "📣 پیام همگانی"), ("admin_settings", "⚙️ تنظیمات")],
+            [("admin_search", "🔎 جستجو"), ("admin_admins", "👮 مدیران")],
             [("cred_admin_home", "🔐 جم با اطلاعات")],
             [("home", "🏠 منوی کاربر")],
         ]
