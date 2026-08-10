@@ -53,50 +53,14 @@ https://rubika.atomicshop.ir/payment/callback
 
 ## فرمان‌های مدیر
 
-ورود: `/admin`
+ورود از منوی کاربر با دکمه **🛠 پنل مدیریت** (بدون نیاز به دستور اسلش).
 
-```text
-/product_add kind|title|price|stock|amount|sku|cost_usd
-/product_edit id|field|value
-/product_delete id
-/category_add title
-/category_delete id
-/code_add gift|CODE|VALUE|MAX
-/code_add discount|CODE|PERCENT|MAX
-/code_delete id
-/user RUBIKA_ID
-/users_balance
-/users_referral
-/users_card
-/block USER_DB_ID
-/unblock USER_DB_ID
-/order ID
-/charge USER_ID AMOUNT
-/charge_all AMOUNT
-/broadcast TEXT
-/reply TICKET_ID TEXT
-/receipt_ok ID
-/receipt_no ID
-/join_ok USER_DB_ID
-/join_no USER_DB_ID
-/admin_add RUBIKA_ID TITLE
-/admin_delete RUBIKA_ID
-/admin_clear
-/setting card_number NUMBER
-/setting card_holder NAME
-/setting card_bank BANK
-/setting welcome_text TEXT
-/department_add TITLE
-/department_delete ID
-/channel_add CHAT_ID|TITLE|INVITE_URL
-/channel_delete ID
-```
+پشتیبان جم با اطلاعات: دکمه **🔐 پنل جم با اطلاعات**.
 
-افزودن، حذف و پاک‌سازی مدیران فرعی فقط توسط شناسه مالک اصلی
-`RUBIKA_ADMIN_ID` امکان‌پذیر است. دکمه پشتیبانی برای همه کاربران نمایش داده
-می‌شود، اما مشاهده و پاسخ به تیکت‌ها فقط از پنل مدیر قابل انجام است.
+همه بخش‌ها (محصولات، دسته‌ها، مالی، تیکت، جم با اطلاعات، مدیران، تنظیمات)
+با دکمه و مکالمه متنی کوتاه انجام می‌شوند.
 
-مقادیر `kind` مجاز: `gem`، `sense_mobile`، `sense_pc` و `store`.
+مقادیر `kind` محصول: `gem`، `gem_credentials`، `sense_mobile`، `sense_pc` و `store`.
 
 ## نکات مالی
 
@@ -114,4 +78,4 @@ https://rubika.atomicshop.ir/payment/callback
 
 Bot API رسمی روبیکا در نسخه فعلی متد عمومی بررسی عضویت یک کاربر مشخص در
 کانال را ارائه نمی‌کند. برای جلوگیری از تأیید جعلی، درخواست کاربر به مدیر
-ارسال و با `/join_ok` یا `/join_no` بررسی می‌شود.
+ارسال و با دکمه‌های تأیید/رد در پنل مدیر بررسی می‌شود.

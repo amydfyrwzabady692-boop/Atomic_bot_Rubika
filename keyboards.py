@@ -22,13 +22,26 @@ def keypad(rows: list[list[tuple[str, str]]]) -> dict:
     }
 
 
-def main_menu() -> dict:
+def main_menu(*, is_admin: bool = False, is_cred_staff: bool = False) -> dict:
+    rows = [
+        [("gems", "🎮 محصولات فری‌فایر"), ("wallet", "💰 کیف پول")],
+        [("orders", "📦 سفارش‌های من"), ("account", "👤 حساب من")],
+        [("store", "🛍 فروشگاه اکانت"), ("sense", "🎯 پک سنس")],
+        [("promo", "🎁 ثبت کد"), ("support", "🎧 پشتیبانی")],
+    ]
+    if is_admin:
+        rows.append([("admin_panel", "🛠 پنل مدیریت")])
+    elif is_cred_staff:
+        rows.append([("cred_admin_home", "🔐 پنل جم با اطلاعات")])
+    return keypad(rows)
+
+
+def credential_staff_menu() -> dict:
     return keypad(
         [
-            [("gems", "🎮 محصولات فری‌فایر"), ("wallet", "💰 کیف پول")],
-            [("orders", "📦 سفارش‌های من"), ("account", "👤 حساب من")],
-            [("store", "🛍 فروشگاه اکانت"), ("sense", "🎯 پک سنس")],
-            [("promo", "🎁 ثبت کد"), ("support", "🎧 پشتیبانی")],
+            [("cred_admin_home", "🔐 پنل جم با اطلاعات")],
+            [("cred_admin_list", "📦 سفارش‌های آماده"), ("cred_admin_tickets", "🎫 تیکت‌ها")],
+            [("home", "🏠 منوی کاربر")],
         ]
     )
 
@@ -43,7 +56,8 @@ def admin_menu() -> dict:
             [("admin_support", "🎧 پشتیبانی"), ("admin_broadcast", "📣 پیام همگانی")],
             [("admin_sync_prices", "🔄 بروزرسانی قیمت جم"), ("admin_fx", "💵 نرخ و سود")],
             [("admin_set_profit", "📈 درصد سود جم"), ("admin_settings", "⚙️ تنظیمات")],
-            [("admin_admins", "👮 مدیریت مدیران")],
+            [("admin_search", "🔎 جستجو"), ("admin_admins", "👮 مدیریت مدیران")],
+            [("cred_admin_home", "🔐 جم با اطلاعات")],
             [("home", "🏠 منوی کاربر")],
         ]
     )

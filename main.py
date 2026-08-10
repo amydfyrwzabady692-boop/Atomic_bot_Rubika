@@ -265,6 +265,7 @@ class Application:
                        JOIN users u ON u.id=o.user_id
                        LEFT JOIN fulfillments f ON f.order_id=o.id
                        WHERE o.status='paid' AND p.kind<>'gem'
+                         AND p.kind<>'gem_credentials'
                          AND (f.id IS NULL OR f.status='WAITING_NOTIFY')
                        ORDER BY o.id LIMIT 1"""
                 )
@@ -313,6 +314,58 @@ class Application:
                             """UPDATE orders SET status='processing'
                                WHERE id=$1 AND status='paid'""",
                             manual["id"],
+                        )
+                    continue
+                credential = await self.db.pool.fetchrow(
+                    """SELECT o.id,u.chat_id,u.rubika_id,p.title,
+                              f.id fulfillment_id
+                       FROM orders o
+                       JOIN order_items i ON i.order_id=o.id
+                       JOIN products p ON p.id=i.product_id
+                       JOIN users u ON u.id=o.user_id
+                       JOIN credential_orders c ON c.order_id=o.id
+                       LEFT JOIN fulfillments f ON f.order_id=o.id
+                       WHERE o.status='paid' AND p.kind='gem_credentials'
+                         AND (f.id IS NULL OR f.status='WAITING_NOTIFY')
+                       ORDER BY o.id LIMIT 1"""
+                )
+                if credential:
+                    if credential["fulfillment_id"]:
+                        claimed = credential["fulfillment_id"]
+                    else:
+                        claimed = await self.db.pool.fetchval(
+                            """INSERT INTO fulfillments(
+                                 order_id,provider,idempotency_key,status,attempts
+                               ) VALUES($1,'credential',$2,'WAITING_NOTIFY',1)
+                               ON CONFLICT(order_id) DO NOTHING RETURNING id""",
+                            credential["id"],
+                            f"credential:{credential['id']}",
+                        )
+                    if claimed:
+                        await self.router.notify_credential_paid(credential["id"])
+                        await self.api.send_message(
+                            credential["chat_id"],
+                            f"⏳ پرداخت سفارش #{credential['id']} تأیید شد.\n"
+                            "پشتیبان جم با اطلاعات به‌زودی اکانت را بررسی می‌کند.",
+                        )
+                        try:
+                            await self.router.send_user_post_pay_credential_help(
+                                credential["chat_id"], credential["id"]
+                            )
+                        except Exception:
+                            log.exception(
+                                "credential post-pay help failed for %s",
+                                credential["id"],
+                            )
+                        await self.db.pool.execute(
+                            """UPDATE fulfillments SET status='WAITING_ADMIN',
+                               updated_at=now() WHERE order_id=$1""",
+                            credential["id"],
+                        )
+                        await self.db.pool.execute(
+                            """UPDATE orders SET status='processing'
+                               WHERE id=$1 AND status='paid'""",
+                            credential["id"],
                         )
                     continue
                 pending = await self.db.pool.fetchrow(

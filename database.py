@@ -39,9 +39,46 @@ class Database:
             return True
         return bool(
             await self.pool.fetchval(
-                "SELECT 1 FROM admins WHERE rubika_id=$1 AND active", rubika_id
+                "SELECT 1 FROM admins WHERE rubika_id=$1 AND active "
+                "AND COALESCE(role,'admin')='admin'",
+                rubika_id,
             )
         )
+
+    async def is_credential_admin(self, rubika_id: str, root_id: str) -> bool:
+        if rubika_id == root_id:
+            return True
+        return bool(
+            await self.pool.fetchval(
+                "SELECT 1 FROM admins WHERE rubika_id=$1 AND active "
+                "AND COALESCE(role,'admin')='credential'",
+                rubika_id,
+            )
+        )
+
+    async def list_credential_admins(self):
+        return await self.pool.fetch(
+            "SELECT rubika_id,title,role,active,created_at FROM admins "
+            "WHERE active AND COALESCE(role,'admin')='credential' "
+            "ORDER BY created_at"
+        )
+
+    async def add_admin(self, rubika_id: str, title: str = "", role: str = "admin"):
+        role = str(role or "admin").strip().lower()
+        if role not in {"admin", "credential"}:
+            raise ValueError("نقش باید admin یا credential باشد.")
+        await self.pool.execute(
+            """INSERT INTO admins(rubika_id,title,role,active)
+               VALUES($1,$2,$3,true)
+               ON CONFLICT(rubika_id) DO UPDATE SET
+                 title=EXCLUDED.title,role=EXCLUDED.role,active=true""",
+            str(rubika_id).strip(),
+            str(title or "")[:120],
+            role,
+        )
+
+    async def remove_admin(self, rubika_id: str):
+        await self.pool.execute("DELETE FROM admins WHERE rubika_id=$1", str(rubika_id))
 
     async def setting(self, key: str, default=""):
         value = await self.pool.fetchval("SELECT value FROM settings WHERE key=$1", key)
@@ -1058,3 +1095,301 @@ class Database:
             return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return None
+
+    async def get_credential_support_contact(self):
+        staff = await self.list_credential_admins()
+        if staff:
+            rid = str(staff[0]["rubika_id"])
+            return {
+                "handle": rid,
+                "display": rid,
+                "rubika_id": rid,
+            }
+        raw = str(await self.setting("credential_support_id", "") or "").strip()
+        if raw:
+            return {"handle": raw, "display": raw, "rubika_id": raw}
+        return {"handle": "", "display": "پشتیبانی", "rubika_id": ""}
+
+    async def create_credential_order(
+        self,
+        user_id: int,
+        product_id: int,
+        *,
+        login_method: str,
+        ciphertext: str,
+        two_factor: bool = False,
+    ):
+        order, product = await self.create_order(user_id, product_id, player_id="")
+        await self.pool.execute(
+            """INSERT INTO credential_orders(
+                 order_id,login_method,ciphertext,two_factor,cred_status
+               ) VALUES($1,$2,$3,$4,'awaiting_payment')""",
+            order["id"],
+            str(login_method or ""),
+            str(ciphertext or ""),
+            bool(two_factor),
+        )
+        return order, product
+
+    async def mark_credential_paid(self, order_id: int):
+        await self.pool.execute(
+            """UPDATE credential_orders SET cred_status='ready'
+               WHERE order_id=$1 AND cred_status='awaiting_payment'""",
+            int(order_id),
+        )
+
+    async def list_ready_credential_orders(self, limit=30, *, paid_only=True):
+        paid_filter = (
+            "AND o.status IN ('paid','processing') "
+            if paid_only
+            else ""
+        )
+        return await self.pool.fetch(
+            f"""SELECT o.id,o.status,o.total_amount,o.paid_at,o.created_at,
+                      p.title,c.login_method,c.cred_status,c.two_factor,
+                      u.rubika_id,u.display_name,u.chat_id,
+                      CASE WHEN c.ciphertext='' OR c.deleted_at IS NOT NULL
+                           THEN false ELSE true END AS has_secret
+               FROM credential_orders c
+               JOIN orders o ON o.id=c.order_id
+               JOIN order_items i ON i.order_id=o.id
+               JOIN products p ON p.id=i.product_id
+               JOIN users u ON u.id=o.user_id
+               WHERE p.kind='gem_credentials'
+                 AND c.cred_status IN ('ready','needs_info','awaiting_payment')
+                 {paid_filter}
+               ORDER BY CASE c.cred_status
+                          WHEN 'ready' THEN 0 WHEN 'needs_info' THEN 1
+                          ELSE 2 END, o.id DESC
+               LIMIT $1""",
+            max(1, min(int(limit), 100)),
+        )
+
+    async def get_credential_order(self, order_id: int):
+        return await self.pool.fetchrow(
+            """SELECT o.*,c.login_method,c.ciphertext,c.two_factor,c.cred_status,
+                      c.viewed_at,c.deleted_at,c.admin_note,
+                      p.title AS product_title,p.kind,
+                      u.rubika_id,u.display_name,u.chat_id,u.id AS user_db_id
+               FROM credential_orders c
+               JOIN orders o ON o.id=c.order_id
+               JOIN order_items i ON i.order_id=o.id
+               JOIN products p ON p.id=i.product_id
+               JOIN users u ON u.id=o.user_id
+               WHERE c.order_id=$1""",
+            int(order_id),
+        )
+
+    async def mark_credential_viewed(self, order_id: int):
+        await self.pool.execute(
+            """UPDATE credential_orders SET viewed_at=COALESCE(viewed_at,now())
+               WHERE order_id=$1""",
+            int(order_id),
+        )
+
+    async def complete_credential_order(self, order_id: int):
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """UPDATE credential_orders
+                       SET cred_status='completed',ciphertext='',deleted_at=now()
+                       WHERE order_id=$1 AND cred_status IN ('ready','needs_info')
+                       RETURNING order_id""",
+                    int(order_id),
+                )
+                if not row:
+                    raise ValueError("سفارش قابل تکمیل نیست.")
+                await conn.execute(
+                    """UPDATE orders SET status='completed'
+                       WHERE id=$1 AND status IN ('paid','processing','delivered')""",
+                    int(order_id),
+                )
+                await conn.execute(
+                    """UPDATE fulfillments SET status='COMPLETED',updated_at=now()
+                       WHERE order_id=$1""",
+                    int(order_id),
+                )
+
+    async def reject_credential_info(self, order_id: int, note: str = ""):
+        await self.pool.execute(
+            """UPDATE credential_orders
+               SET cred_status='needs_info',
+                   admin_note=COALESCE(NULLIF($2,''),admin_note)
+               WHERE order_id=$1 AND cred_status IN ('ready','needs_info')""",
+            int(order_id),
+            str(note or "")[:500],
+        )
+        await self.pool.execute(
+            """UPDATE orders SET status='processing'
+               WHERE id=$1 AND status IN ('paid','processing')""",
+            int(order_id),
+        )
+
+    async def refund_credential_order(self, order_id: int) -> int:
+        """لغو سفارش جم با اطلاعات و برگشت مبلغ پرداخت‌شده به کیف پول."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="serializable"):
+                order = await conn.fetchrow(
+                    """SELECT o.*,c.cred_status
+                       FROM orders o
+                       JOIN credential_orders c ON c.order_id=o.id
+                       WHERE o.id=$1 FOR UPDATE OF o""",
+                    int(order_id),
+                )
+                if not order:
+                    raise ValueError("سفارش اطلاعاتی پیدا نشد.")
+                if order["status"] in ("completed", "delivered", "cancelled"):
+                    raise ValueError("این سفارش قبلاً نهایی شده است.")
+                if order["status"] not in ("pending", "paid", "processing"):
+                    raise ValueError("وضعیت سفارش قابل لغو نیست.")
+                refunded = int(order["wallet_paid"] or 0)
+                verified = await conn.fetchval(
+                    """SELECT coalesce(sum(amount),0) FROM payments
+                       WHERE order_id=$1 AND status='verified'
+                         AND provider IN ('gateway','card')""",
+                    int(order_id),
+                )
+                refunded += int(verified or 0)
+                already = await conn.fetchval(
+                    """SELECT 1 FROM wallet_ledger
+                       WHERE reference=$1 LIMIT 1""",
+                    f"cred-refund:{order_id}",
+                )
+                if already:
+                    refunded = 0
+                if refunded > 0:
+                    inserted = await conn.fetchval(
+                        """INSERT INTO wallet_ledger(
+                             user_id,amount,entry_type,reference
+                           ) VALUES($1,$2,'order_refund',$3)
+                           ON CONFLICT(reference) DO NOTHING RETURNING id""",
+                        order["user_id"],
+                        refunded,
+                        f"cred-refund:{order_id}",
+                    )
+                    if inserted:
+                        await conn.execute(
+                            "UPDATE users SET balance=balance+$1 WHERE id=$2",
+                            refunded,
+                            order["user_id"],
+                        )
+                    else:
+                        refunded = 0
+                if order["inventory_reserved"]:
+                    await conn.execute(
+                        """UPDATE products p SET stock=stock+i.quantity
+                           FROM order_items i
+                           WHERE i.order_id=$1 AND i.product_id=p.id""",
+                        int(order_id),
+                    )
+                await conn.execute(
+                    """UPDATE credential_orders
+                       SET cred_status='completed',ciphertext='',deleted_at=now(),
+                           admin_note='refunded'
+                       WHERE order_id=$1""",
+                    int(order_id),
+                )
+                await conn.execute(
+                    """UPDATE orders SET status='cancelled',wallet_paid=0,
+                       payable_amount=0,inventory_reserved=false
+                       WHERE id=$1""",
+                    int(order_id),
+                )
+                await conn.execute(
+                    """UPDATE fulfillments SET status='CANCELLED',updated_at=now()
+                       WHERE order_id=$1""",
+                    int(order_id),
+                )
+                await conn.execute(
+                    """UPDATE payments SET status='cancelled'
+                       WHERE order_id=$1 AND status='pending'""",
+                    int(order_id),
+                )
+                return refunded
+
+    async def wipe_credential_secret(self, order_id: int):
+        await self.pool.execute(
+            """UPDATE credential_orders
+               SET ciphertext='',deleted_at=now()
+               WHERE order_id=$1""",
+            int(order_id),
+        )
+
+    async def count_ready_credential_orders(self):
+        return int(
+            await self.pool.fetchval(
+                """SELECT COUNT(*) FROM credential_orders c
+                   JOIN orders o ON o.id=c.order_id
+                   WHERE c.cred_status IN ('ready','needs_info')
+                     AND o.status IN ('paid','processing')"""
+            )
+            or 0
+        )
+
+    async def get_credential_pricing_config(self):
+        from decimal import Decimal, InvalidOperation
+
+        legacy = str(await self.setting("credential_profit_percent", "40") or "40")
+
+        async def _profit(key):
+            raw = str(await self.setting(key, legacy) or legacy)
+            try:
+                return max(1, min(200, int(raw.replace("%", "").replace("٪", ""))))
+            except (TypeError, ValueError):
+                return 40
+
+        async def _cost(key, default):
+            raw = str(await self.setting(key, default) or default).replace(",", "").strip()
+            try:
+                value = Decimal(raw)
+            except (InvalidOperation, TypeError, ValueError):
+                value = Decimal(default)
+            if value < Decimal("0.01") or value > Decimal("1000"):
+                value = Decimal(default)
+            return value
+
+        return {
+            "weekly_cost": await _cost("credential_weekly_cost_usd", "1.328"),
+            "monthly_cost": await _cost("credential_monthly_cost_usd", "6.64"),
+            "weekly_profit": await _profit("credential_weekly_profit_percent"),
+            "monthly_profit": await _profit("credential_monthly_profit_percent"),
+        }
+
+    async def sync_credential_prices(self, rate_value) -> int:
+        """به‌روزرسانی قیمت فروش بسته‌های gem_credentials از بهای دلاری + سود."""
+        from supplier import compute_gem_sale_price
+
+        cfg = await self.get_credential_pricing_config()
+        mapping = (
+            ("cred_weekly", cfg["weekly_cost"], cfg["weekly_profit"]),
+            ("cred_monthly", cfg["monthly_cost"], cfg["monthly_profit"]),
+        )
+        updated = 0
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for sku, cost, profit in mapping:
+                    price = await compute_gem_sale_price(cost, rate_value, profit)
+                    result = await conn.execute(
+                        """UPDATE products
+                           SET supplier_cost_usd=$1, price=$2, amount=CASE
+                             WHEN supplier_sku='cred_weekly' THEN 60
+                             WHEN supplier_sku='cred_monthly' THEN 300
+                             ELSE amount END
+                           WHERE kind='gem_credentials' AND supplier_sku=$3 AND active
+                             AND (price IS DISTINCT FROM $2
+                                  OR supplier_cost_usd::text IS DISTINCT FROM $1)""",
+                        str(cost),
+                        int(price),
+                        sku,
+                    )
+                    try:
+                        updated += int(str(result).split()[-1])
+                    except (ValueError, IndexError):
+                        pass
+                await conn.execute(
+                    """INSERT INTO settings(key,value,updated_at)
+                       VALUES('credential_price_last_sync',now()::text,now())
+                       ON CONFLICT(key) DO UPDATE
+                       SET value=EXCLUDED.value,updated_at=now()"""
+                )
+        return updated

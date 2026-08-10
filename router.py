@@ -2,8 +2,10 @@ import logging
 import os
 import re
 
+from admin_flows import AdminFlowHandlers
+from credentials import CredentialHandlers
 from database import Database
-from keyboards import admin_menu, inline, link_button, main_menu
+from keyboards import admin_menu, credential_staff_menu, inline, link_button, main_menu
 from payment_safety import (
     MIN_WALLET_CHARGE,
     checked_amount,
@@ -47,7 +49,7 @@ WELCOME = """✨ به اتومیک شاپ روبیکا خوش اومدی! ✨
 ⚛️ Atomic Shop"""
 
 
-class Router:
+class Router(CredentialHandlers, AdminFlowHandlers):
     def __init__(self, db: Database, api: RubikaAPI, config):
         self.db, self.api, self.config = db, api, config
         settings_getter = getattr(db, "setting", None)
@@ -58,6 +60,13 @@ class Router:
 
     async def send(self, chat_id, text, *, menu=None, buttons=None):
         return await self.api.send_message(chat_id, text, chat_keypad=menu, inline_keypad=buttons)
+
+    async def user_menu(self, rubika_id: str):
+        is_admin = await self.db.is_admin(rubika_id, self.config.admin_id)
+        is_cred = (not is_admin) and await self.db.is_credential_admin(
+            rubika_id, self.config.admin_id
+        )
+        return main_menu(is_admin=is_admin, is_cred_staff=is_cred)
 
     async def handle(self, event: dict):
         if not event["chat_id"] or not event["sender_id"]:
@@ -99,11 +108,22 @@ class Router:
             "📣 پیام همگانی": "admin_broadcast",
             "🔄 بروزرسانی قیمت جم": "admin_sync_prices",
             "📈 درصد سود جم": "admin_set_profit",
+            "🔐 جم با اطلاعات": "cred_admin_home",
+            "🛠 پنل مدیریت": "admin_panel",
+            "🔐 پنل جم با اطلاعات": "cred_admin_home",
+            "📦 سفارش‌های آماده": "cred_admin_list",
+            "🎫 تیکت‌ها": "cred_admin_tickets",
         }
         action = _admin_label_map.get(action, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
             await self.db.set_session(event["sender_id"])
             await self.start(event, user)
+            return
+        if action == "admin_panel":
+            if await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.open_admin_panel(event)
+            else:
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
             return
         if action == "/myid":
             # شناسه روبیکای خودت را ببین؛ مالک برای تنظیم RUBIKA_ADMIN_ID به این
@@ -114,6 +134,7 @@ class Router:
             )
             return
         is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
+        is_cred_staff = await self.ensure_credential_staff(event["sender_id"])
         receipt_in_progress = False
         if event.get("file"):
             current_state, _ = await self.db.session(event["sender_id"])
@@ -121,24 +142,54 @@ class Router:
         if (
             action != "join_request"
             and not is_admin
+            and not is_cred_staff
             and not receipt_in_progress
             and not await self.can_use_bot(user["id"])
         ):
             await self.start(event, user)
             return
+        # قیمت‌گذاری فقط برای ادمین کامل (قبل از مسیر عمومی cred_*)
+        if action in {
+            "admin_cred_pricing",
+            "cred_pricing",
+            "cred_price_sync",
+        } or action.startswith("admin_cred_set_"):
+            if not is_admin:
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            if action.startswith("admin_cred_set_"):
+                await self._start_credential_setting(event, action)
+                return
+            await self.dispatch_credential_action(event, user, action)
+            return
+        if action in {"/credadmin", "cred_admin_home"} or action.startswith(
+            ("cred_admin_", "cred_")
+        ):
+            # Staff-only admin credential actions
+            if action.startswith("cred_admin_") or action in {
+                "/credadmin",
+                "cred_admin_home",
+            }:
+                if not is_cred_staff:
+                    await self.send(
+                        event["chat_id"], "⛔️ دسترسی پنل جم با اطلاعات ندارید."
+                    )
+                    return
+            if await self.dispatch_credential_action(event, user, action):
+                return
         if action == "/admin" or action.startswith("admin_"):
             if is_admin:
-                await self.admin(event, action)
+                if action == "/admin":
+                    await self.open_admin_panel(event)
+                else:
+                    await self.admin(event, action)
             elif action == "/admin":
-                # وقتی مالک واقعی هنوز RUBIKA_ADMIN_ID را تنظیم نکرده، این پیام
-                # شناسه روبیکای او را نشان می‌دهد تا بتواند دسترسی ادمین بگیرد.
                 await self.send(
                     event["chat_id"],
                     "⛔️ دسترسی مدیر ندارید.\n"
                     f"🆔 شناسه شما: `{event['sender_id']}`\n\n"
-                    "اگر مالک ربات هستید، این شناسه را در متغیر `RUBIKA_ADMIN_ID` "
-                    "فایل `.env` روی سرور قرار دهید و ربات را دوباره اجرا کنید.\n"
-                    "اگر مدیر هستید، از مالک بخواهید شما را با `/admin_add` اضافه کند.",
+                    "اگر مالک ربات هستید، این شناسه را در `RUBIKA_ADMIN_ID` بگذارید.\n"
+                    "اگر پشتیبان جم با اطلاعات هستید، از دکمه پنل جم با اطلاعات استفاده کنید.",
                 )
             else:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
@@ -154,16 +205,30 @@ class Router:
                 "card_verify:",
                 "ticket:",
                 "ticket_close:",
+                "ticket_reply:",
                 "order_complete:",
             )
         ):
-            if not is_admin:
-                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+            if is_admin:
+                await self.handle_admin_action(event, action)
                 return
-            await self.handle_admin_action(event, action)
+            if is_cred_staff and (
+                action.startswith("ticket:")
+                or action.startswith("ticket_close:")
+                or action.startswith("ticket_reply:")
+            ):
+                await self.handle_admin_action(event, action, credential_only=True)
+                return
+            await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
             return
         if action.startswith("/") and is_admin:
+            # دستورات اسلش فقط به‌عنوان سازگاری قدیمی؛ پنل کاملاً دکمه‌ای است.
             await self.admin_command(event, action)
+            return
+        if action.startswith("/") and is_cred_staff and action.startswith(
+            ("/reply", "/credadmin")
+        ):
+            await self.admin_command(event, action, credential_only=True)
             return
         if action == "noop":
             return
@@ -335,12 +400,12 @@ class Router:
             )
             return
         routes = {
-            "gems": lambda: self.show_products(event, "gem", "🎮 محصولات فری‌فایر"),
-            "💎 خرید جم": lambda: self.show_products(event, "gem", "🎮 محصولات فری‌فایر"),
-            "💎 جم فری‌فایر": lambda: self.show_products(event, "gem", "🎮 محصولات فری‌فایر"),
-            "🎮 محصولات فری‌فایر": lambda: self.show_products(
-                event, "gem", "🎮 محصولات فری‌فایر"
-            ),
+            "gems": lambda: self.freefire_menu(event),
+            "💎 خرید جم": lambda: self.freefire_menu(event),
+            "💎 جم فری‌فایر": lambda: self.freefire_menu(event),
+            "🎮 محصولات فری‌فایر": lambda: self.freefire_menu(event),
+            "gems_by_id": lambda: self.show_products(event, "gem", "🆔 جم با آیدی"),
+            "gems_credentials": lambda: self.credential_products_menu(event),
             "sense": lambda: self.sense_menu(event),
             "🎯 پک سنسیویتی": lambda: self.sense_menu(event),
             "🎯 پک سنس": lambda: self.sense_menu(event),
@@ -401,7 +466,7 @@ class Router:
         خروجی: (available, error_message, cost_usd, balance_usd)
         """
         rows = await self.db.pool.fetch(
-            """SELECT p.supplier_sku,p.supplier_cost_usd,p.amount
+            """SELECT p.supplier_sku,p.supplier_cost_usd,p.amount,p.kind
                FROM order_items i
                JOIN products p ON p.id=i.product_id
                WHERE i.order_id=$1""",
@@ -410,7 +475,11 @@ class Router:
         if not rows:
             return False, "قلمی برای سفارش پیدا نشد.", None, None
         force = True
+        checked = False
         for row in rows:
+            # فقط جم خودکار از G2Bulk چک می‌شود؛ بقیه (سنس/فروشگاه/جم با اطلاعات) دستی‌اند.
+            if row["kind"] != "gem":
+                continue
             if str(row["supplier_sku"] or "").strip().isdigit():
                 amount = int(row["amount"] or row["supplier_sku"])
                 catalogue = str(row["supplier_sku"] or amount)
@@ -423,9 +492,13 @@ class Router:
             available, cost_usd, balance, error = await can_fulfill(
                 amount, catalogue, force=force
             )
+            checked = True
             if not available:
                 return False, error or "موجودی سرویس تأمین کافی نیست.", cost_usd, balance
             force = False
+        if not checked and any(row["kind"] == "gem" for row in rows):
+            # جم بدون sku قابل تحویل خودکار نیست — اجازه پرداخت بده و دستی هندل شود.
+            return True, None, None, None
         return True, None, None, None
 
     async def start(self, event, user):
@@ -451,7 +524,25 @@ class Router:
         text = await self.db.setting("welcome_text", WELCOME)
         if text.strip() == "✨ به اتومیک شاپ روبیکا خوش اومدی! ✨":
             text = WELCOME
-        await self.send(event["chat_id"], text, menu=main_menu())
+        is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
+        is_cred = (not is_admin) and await self.db.is_credential_admin(
+            event["sender_id"], self.config.admin_id
+        )
+        if is_admin:
+            text += "\n\n🛠 برای مدیریت، از دکمه «پنل مدیریت» در منو استفاده کن."
+        elif is_cred:
+            text += "\n\n🔐 برای سفارش‌های جم با اطلاعات، دکمه «پنل جم با اطلاعات» را بزن."
+            await self.send(
+                event["chat_id"],
+                text,
+                menu=credential_staff_menu(),
+            )
+            return
+        await self.send(
+            event["chat_id"],
+            text,
+            menu=await self.user_menu(event["sender_id"]),
+        )
 
     async def join_request(self, event, user):
         request = await self.db.pool.fetchrow(
@@ -585,7 +676,12 @@ class Router:
                 for number in range(1, total_pages + 1)
             ]
             buttons.append(navigation)
-        buttons.append([("home", "🏠 بازگشت")])
+        if kind == "gem":
+            buttons.append([("gems", "🔙 روش‌های خرید")])
+        elif kind.startswith("sense"):
+            buttons.append([("sense", "🔙 پک سنس")])
+        else:
+            buttons.append([("home", "🏠 بازگشت")])
         await self.send(
             event["chat_id"],
             f"{title}\nبسته موردنظرت را انتخاب کن — صفحه {page} از {total_pages} 👇",
@@ -637,6 +733,9 @@ class Router:
                 ),
             )
             return
+        if kind == "gem_credentials":
+            await self.show_credential_product(event, product_id)
+            return
         await self.create_order_prompt(event, user, product_id)
 
     async def ask_gem_player_id(self, event, product_id):
@@ -683,6 +782,46 @@ class Router:
                 [(f"pay:wallet:{order_id}", "💰 کیف پول")],
                 [(f"pay_cancel:{order_id}", "✖️ لغو سفارش")],
             ]
+        )
+
+    async def _start_credential_setting(self, event, action: str):
+        mapping = {
+            "admin_cred_set_weekly_profit": (
+                "credential_weekly_profit_percent",
+                "profit",
+                "📅 سود هفتگی جم با اطلاعات (۱ تا ۲۰۰٪)",
+            ),
+            "admin_cred_set_monthly_profit": (
+                "credential_monthly_profit_percent",
+                "profit",
+                "📆 سود ماهانه جم با اطلاعات (۱ تا ۲۰۰٪)",
+            ),
+            "admin_cred_set_weekly_cost": (
+                "credential_weekly_cost_usd",
+                "cost",
+                "💵 بهای دلاری هفتگی (مثلاً 1.328)",
+            ),
+            "admin_cred_set_monthly_cost": (
+                "credential_monthly_cost_usd",
+                "cost",
+                "💵 بهای دلاری ماهانه (مثلاً 6.64)",
+            ),
+        }
+        item = mapping.get(action)
+        if not item:
+            await self.send(event["chat_id"], "❌ تنظیم نامعتبر است.")
+            return
+        key, kind, title = item
+        current = await self.db.setting(key, "")
+        await self.db.set_session(
+            event["sender_id"],
+            "admin_cred_setting",
+            {"key": key, "kind": kind},
+        )
+        await self.send(
+            event["chat_id"],
+            f"{title}\nمقدار فعلی: {current or '—'}\n\nمقدار جدید را بفرست:",
+            buttons=inline([[("admin_cred_pricing", "🔙 بازگشت"), ("admin_cancel_broadcast", "✖️ انصراف")]]),
         )
 
     async def send_gateway_link(
@@ -995,6 +1134,7 @@ class Router:
             "paid": "پرداخت‌شده",
             "processing": "در حال انجام",
             "completed": "تکمیل‌شده",
+            "delivered": "تکمیل‌شده",
             "cancelled": "لغوشده",
             "expired": "منقضی",
             "delivery_failed": "نیازمند پیگیری",
@@ -1096,6 +1236,120 @@ class Router:
         )
 
     async def handle_state(self, event, user, state, data):
+        if state in {"cred_method", "cred_confirm"}:
+            await self.credential_prompt_current_step(event, state, data)
+            return
+        if state in {
+            "cred_identifier",
+            "cred_password",
+            "cred_backup",
+        }:
+            await self.credential_handle_state(event, user, state, data)
+            return
+        if state == "cred_ticket_message":
+            await self.credential_ticket_receive(event, user, data)
+            return
+        if state == "admin_ticket_reply":
+            await self.ticket_reply_receive(event, data)
+            return
+        if state.startswith("admin_product_add_"):
+            if await self.product_add_handle_state(event, state, data):
+                return
+        if state == "admin_product_edit_price":
+            try:
+                price = checked_amount(event["text"], label="قیمت")
+            except ValueError as exc:
+                await self.send(event["chat_id"], f"❌ {exc}")
+                return
+            pid = int(data.get("product_id") or 0)
+            await self.db.pool.execute(
+                "UPDATE products SET price=$1 WHERE id=$2", price, pid
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], f"✅ قیمت محصول #{pid} به‌روز شد.")
+            await self.product_open(event, pid)
+            return
+        if state == "admin_product_edit_stock":
+            try:
+                stock = int(
+                    event["text"]
+                    .strip()
+                    .translate(
+                        str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+                    )
+                )
+            except ValueError:
+                await self.send(event["chat_id"], "❌ فقط عدد بفرست.")
+                return
+            if stock < 0:
+                await self.send(event["chat_id"], "موجودی منفی مجاز نیست.")
+                return
+            pid = int(data.get("product_id") or 0)
+            await self.db.pool.execute(
+                "UPDATE products SET stock=$1 WHERE id=$2", stock, pid
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], f"✅ موجودی محصول #{pid} به‌روز شد.")
+            await self.product_open(event, pid)
+            return
+        if state == "admin_category_add":
+            title = (event.get("text") or "").strip()
+            if not title:
+                await self.send(event["chat_id"], "عنوان خالی است.")
+                return
+            await self.db.pool.execute(
+                """INSERT INTO categories(title,sort_order)
+                   VALUES($1,(SELECT COALESCE(MAX(sort_order),0)+10 FROM categories))
+                   ON CONFLICT(title) DO UPDATE SET active=true""",
+                title,
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], f"✅ دسته «{title}» اضافه شد.")
+            await self.categories_manage_home(event)
+            return
+        if state == "admin_setting_edit":
+            await self.setting_edit_receive(event, data)
+            return
+        if state == "admin_search_query":
+            await self.search_receive(event)
+            return
+        if state == "admin_channel_add":
+            parts = [p.strip() for p in (event.get("text") or "").split("|")]
+            if len(parts) < 3:
+                await self.send(
+                    event["chat_id"],
+                    "فرمت: chat_id|عنوان|لینک دعوت",
+                )
+                return
+            chat_id, title, url = parts[0], parts[1], parts[2]
+            await self.db.pool.execute(
+                """INSERT INTO forced_channels(chat_id,title,invite_url,active)
+                   VALUES($1,$2,$3,true)
+                   ON CONFLICT(chat_id) DO UPDATE
+                   SET title=EXCLUDED.title,invite_url=EXCLUDED.invite_url,active=true""",
+                chat_id,
+                title,
+                url,
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], f"✅ کانال «{title}» اضافه شد.")
+            await self.admin(event, "admin_settings")
+            return
+        if state == "admin_department_add":
+            title = (event.get("text") or "").strip()
+            if not title:
+                await self.send(event["chat_id"], "عنوان خالی است.")
+                return
+            await self.db.pool.execute(
+                """INSERT INTO departments(title,active)
+                   VALUES($1,true)
+                   ON CONFLICT(title) DO UPDATE SET active=true""",
+                title,
+            )
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], f"✅ دپارتمان «{title}» اضافه شد.")
+            await self.admin(event, "admin_settings")
+            return
         if state == "gem_player_id":
             if not str(data.get("product_id", "")).isdigit():
                 await self.db.set_session(event["sender_id"])
@@ -1199,8 +1453,13 @@ class Router:
                 await self.api.send_message(
                     self.config.admin_chat_id,
                     f"🎧 تیکت #{ticket['id']} از {event['sender_id']}\n"
-                    f"دپارتمان: {data.get('department') or 'عمومی'}\n{text}\n\n"
-                    f"پاسخ: /reply {ticket['id']} متن",
+                    f"دپارتمان: {data.get('department') or 'عمومی'}\n{text}",
+                    inline_keypad=inline(
+                        [
+                            [(f"ticket_reply:{ticket['id']}", "💬 پاسخ")],
+                            [(f"ticket:{ticket['id']}", "🎫 باز کردن")],
+                        ]
+                    ),
                 )
             except RubikaAPIError:
                 log.exception("Ticket %s saved but admin notification failed", ticket["id"])
@@ -1395,6 +1654,26 @@ class Router:
                 f"✅ مدیر {title} با شناسه {rubika_id} اضافه شد.",
                 menu=admin_menu(),
             )
+        elif state == "admin_add_cred_admin":
+            if event["sender_id"] != self.config.admin_id:
+                await self.db.set_session(event["sender_id"])
+                await self.send(
+                    event["chat_id"], "⛔️ فقط مالک اصلی می‌تواند پشتیبان اضافه کند."
+                )
+                return
+            parts = event["text"].strip().split(maxsplit=1)
+            if len(parts) < 2:
+                await self.send(
+                    event["chat_id"],
+                    "فرمت درست: `u0...` عنوان\nمثال: `u0xxxx پشتیبانی جم`",
+                )
+                return
+            rubika_id, title = parts[0].strip(), parts[1].strip()
+            if not re.fullmatch(r"u0[A-Za-z0-9]{10,80}", rubika_id):
+                await self.send(event["chat_id"], "❌ شناسه روبیکا معتبر نیست (فرمت u0...).")
+                return
+            await self.db.set_session(event["sender_id"])
+            await self.owner_add_credential_admin(event, rubika_id, title)
         elif state == "admin_code_add":
             if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
                 await self.db.set_session(event["sender_id"])
@@ -1561,6 +1840,50 @@ class Router:
                 "برای اعمال روی قیمت‌ها، «🔄 بروزرسانی قیمت جم» را بزن.",
                 menu=admin_menu(),
             )
+        elif state == "admin_cred_setting":
+            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
+                return
+            key = str(data.get("key") or "")
+            raw = (
+                event["text"]
+                .strip()
+                .replace("٪", "")
+                .replace("%", "")
+                .replace(",", "")
+            )
+            if key.endswith("_profit_percent"):
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    await self.send(event["chat_id"], "❌ فقط عدد بفرست (مثلاً 40).")
+                    return
+                if not 1 <= value <= 200:
+                    await self.send(event["chat_id"], "❌ درصد باید بین ۱ تا ۲۰۰ باشد.")
+                    return
+                await self.db.set_setting(key, str(value))
+                msg = f"✅ {key} = {value}٪"
+            elif key.endswith("_cost_usd"):
+                try:
+                    from decimal import Decimal, InvalidOperation
+
+                    value = Decimal(raw)
+                except (InvalidOperation, TypeError, ValueError):
+                    await self.send(event["chat_id"], "❌ عدد اعشاری معتبر بفرست (مثلاً 1.328).")
+                    return
+                if value < Decimal("0.01") or value > Decimal("1000"):
+                    await self.send(event["chat_id"], "❌ هزینه باید بین 0.01 تا 1000 باشد.")
+                    return
+                await self.db.set_setting(key, str(value))
+                msg = f"✅ {key} = {value} USD"
+            else:
+                await self.db.set_session(event["sender_id"])
+                await self.send(event["chat_id"], "❌ تنظیم نامعتبر.")
+                return
+            await self.db.set_session(event["sender_id"])
+            await self.send(event["chat_id"], msg)
+            await self.credential_pricing_hub(event)
         elif state == "admin_broadcast":
             if not await self.db.is_admin(
                 event["sender_id"], self.config.admin_id
@@ -1618,12 +1941,19 @@ class Router:
                   (SELECT count(*) FROM tickets WHERE status='open') open_tickets,
                   (SELECT count(*) FROM payments WHERE status='pending' AND expires_at>now()) active_payments,
                   (SELECT count(*) FROM orders WHERE status='pending' AND created_at>now()-interval '1 day') pending_24h,
-                  (SELECT count(*) FROM orders WHERE paid_at IS NOT NULL AND paid_at>now()-interval '1 day') sales_24h
+                  (SELECT count(*) FROM orders WHERE paid_at IS NOT NULL AND paid_at>now()-interval '1 day') sales_24h,
+                  (SELECT count(*) FROM credential_orders c
+                     JOIN orders o ON o.id=c.order_id
+                    WHERE c.cred_status IN ('ready','needs_info')
+                      AND o.status IN ('paid','processing')) ready_credentials,
+                  (SELECT count(*) FROM tickets
+                    WHERE status='open' AND COALESCE(category,'bot')='credential') cred_tickets
                 """
             )
             alerts = (
                 int(ops["pending_receipts"]) + int(ops["failed"])
                 + int(ops["open_tickets"]) + int(ops["open_orders"])
+                + int(ops["ready_credentials"])
             )
             await self.send(
                 chat,
@@ -1633,6 +1963,8 @@ class Router:
                 f"تحویل ناموفق: {ops['failed']:,}\n"
                 f"رسید در انتظار: {ops['pending_receipts']:,}\n"
                 f"تیکت باز: {ops['open_tickets']:,}\n"
+                f"🔐 جم با اطلاعات آماده: {ops['ready_credentials']:,}\n"
+                f"🔐 تیکت جم با اطلاعات: {ops['cred_tickets']:,}\n"
                 f"پرداخت فعال: {ops['active_payments']:,}\n"
                 f"فروش ۲۴ ساعت اخیر: {ops['sales_24h']:,}\n"
                 f"سفارش‌های pending دیروز: {ops['pending_24h']:,}\n"
@@ -1658,10 +1990,17 @@ class Router:
                                 f"🎧 تیکت‌ها ({ops['open_tickets']:,})",
                             )
                         ],
+                        [
+                            (
+                                "cred_admin_home",
+                                f"🔐 جم با اطلاعات ({ops['ready_credentials']:,})",
+                            )
+                        ],
                     ]
                 ),
             )
         elif action == "admin_shop":
+            ready_cred = await self.db.count_ready_credential_orders()
             await self.send(
                 chat,
                 "🛍 مدیریت فروشگاه\nیک بخش را انتخاب کن:",
@@ -1671,6 +2010,13 @@ class Router:
                         [("admin_categories", "🗂 دسته‌بندی‌ها")],
                         [("admin_codes", "🎁 کدها")],
                         [("admin_finance", "💳 امور مالی")],
+                        [
+                            (
+                                "cred_admin_home",
+                                f"🔐 جم با اطلاعات ({ready_cred})",
+                            )
+                        ],
+                        [("admin_cred_pricing", "💱 قیمت‌گذاری هفتگی/ماهانه")],
                         [("home", "🏠 بازگشت")],
                     ]
                 ),
@@ -1691,11 +2037,22 @@ class Router:
                    ORDER BY o.id DESC LIMIT 20"""
             )
             text = "📦 سفارش‌های باز:\n"
+            buttons = [[("admin_search", "🔎 جستجوی سفارش/کاربر")]]
             if open_rows:
                 text += "\n".join(
                     f"#{r['id']} | {r['status']} | {r['total']:,} ت | {r['rubika_id']}"
                     for r in open_rows
                 )
+                for r in open_rows:
+                    if r["status"] in ("paid", "processing"):
+                        buttons.append(
+                            [
+                                (
+                                    f"order_complete:{r['id']}",
+                                    f"✅ تکمیل #{r['id']}",
+                                )
+                            ]
+                        )
             else:
                 text += "موردی نیست."
             text += "\n\n⚠️ تحویل ناموفق:\n"
@@ -1706,7 +2063,8 @@ class Router:
                 )
             else:
                 text += "موردی نیست."
-            await self.send(chat, text)
+            buttons.append([("admin_ops", "🔙 مرکز عملیات")])
+            await self.send(chat, text, buttons=inline(buttons))
         elif action == "admin_receipts":
             rows = await self.db.pool.fetch(
                 """SELECT r.id,r.payment_id,r.user_id,r.source_chat_id,
@@ -1793,24 +2151,27 @@ class Router:
             rows = await self.db.pool.fetch(
                 "SELECT id,user_id,department FROM tickets WHERE status='open' ORDER BY updated_at DESC LIMIT 30"
             )
+            buttons = []
+            for row in rows[:12]:
+                buttons.append(
+                    [
+                        (f"ticket:{row['id']}", f"🎫 #{row['id']}"),
+                        (f"ticket_reply:{row['id']}", "💬 پاسخ"),
+                    ]
+                )
+            buttons.append([("cred_admin_tickets", "🔐 تیکت جم با اطلاعات")])
             await self.send(
                 chat,
                 "🎧 تیکت‌های باز\n"
                 + (
-                    "\n".join(f"#{r['id']} کاربر {r['user_id']} | {r['department']}" for r in rows)
+                    "\n".join(
+                        f"#{r['id']} کاربر {r['user_id']} | {r['department']}"
+                        for r in rows
+                    )
                     if rows
                     else "موردی نیست."
                 ),
-                buttons=(
-                    inline(
-                        [
-                            [(f"ticket:{row['id']}", f"مشاهده تیکت #{row['id']}")]
-                            for row in rows[:10]
-                        ]
-                    )
-                    if rows
-                    else None
-                ),
+                buttons=inline(buttons) if buttons else None,
             )
         elif action == "admin_admins":
             if event["sender_id"] != self.config.admin_id:
@@ -1828,7 +2189,8 @@ class Router:
                 "مدیران فعال:",
             ]
             lines.extend(
-                f"• {row['rubika_id']} | {row['title'] or 'بدون عنوان'}"
+                f"• {row['rubika_id']} | {row['title'] or 'بدون عنوان'} | "
+                f"نقش: {'🔐 جم با اطلاعات' if row['role']=='credential' else '🛠 ادمین'}"
                 for row in active_rows
                 if row["rubika_id"] != self.config.admin_id
             )
@@ -1848,6 +2210,9 @@ class Router:
                     ]
                 )
             buttons.append([("admin_add_admin", "➕ افزودن مدیر با شناسه")])
+            buttons.append(
+                [("admin_add_cred_admin", "🔐 افزودن/تعیین پشتیبان جم با اطلاعات")]
+            )
             buttons.append([("admin_clear_all", "🗑 حذف همه مدیران فرعی")])
             buttons.append([("home", "🏠 بازگشت")])
             await self.send(chat, "\n".join(lines), buttons=inline(buttons))
@@ -1934,40 +2299,83 @@ class Router:
             )
             await self.db.set_session(event["sender_id"], "admin_set_profit", {})
         elif action == "admin_products":
-            rows = await self.db.pool.fetch(
-                """SELECT id,kind,title,price,stock,active
-                   FROM products ORDER BY kind,sort_order,id LIMIT 100"""
+            await self.products_manage_home(event)
+        elif action == "admin_product_add":
+            await self.product_add_start(event)
+        elif action.startswith("admin_product_kind:"):
+            await self.product_kind_selected(
+                event, action.removeprefix("admin_product_kind:")
             )
-            lines = [
-                f"#{row['id']} | {row['kind']} | {row['title']} | "
-                f"{row['price']:,} ت | موجودی {row['stock']} | "
-                f"{'فعال' if row['active'] else 'غیرفعال'}"
-                for row in rows
-            ]
-            await self.send(
-                chat,
-                "📦 محصولات\n" + ("\n".join(lines) if lines else "محصولی نیست.")
-                + "\n\n"
-                + self.admin_help(action),
-            )
-        elif action == "admin_categories":
-            rows = await self.db.pool.fetch(
-                "SELECT id,title,active FROM categories ORDER BY sort_order,id"
-            )
-            await self.send(
-                chat,
-                "🗂 دسته‌بندی‌ها\n"
-                + (
-                    "\n".join(
-                        f"#{row['id']} | {row['title']} | "
-                        f"{'فعال' if row['active'] else 'غیرفعال'}"
-                        for row in rows
-                    )
-                    or "دسته‌ای نیست."
+        elif action.startswith("admin_product_open:"):
+            pid = action.removeprefix("admin_product_open:")
+            if pid.isdigit():
+                await self.product_open(event, int(pid))
+        elif action.startswith("admin_product_toggle:"):
+            pid = action.removeprefix("admin_product_toggle:")
+            if pid.isdigit():
+                await self.db.pool.execute(
+                    "UPDATE products SET active=NOT active WHERE id=$1", int(pid)
                 )
-                + "\n\n"
-                + self.admin_help(action),
-            )
+                await self.product_open(event, int(pid))
+        elif action.startswith("admin_product_edit_price:"):
+            pid = action.removeprefix("admin_product_edit_price:")
+            if pid.isdigit():
+                await self.db.set_session(
+                    event["sender_id"],
+                    "admin_product_edit_price",
+                    {"product_id": int(pid)},
+                )
+                await self.send(
+                    chat,
+                    f"💰 قیمت جدید محصول #{pid} را به تومان بفرست:",
+                    buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+                )
+        elif action.startswith("admin_product_edit_stock:"):
+            pid = action.removeprefix("admin_product_edit_stock:")
+            if pid.isdigit():
+                await self.db.set_session(
+                    event["sender_id"],
+                    "admin_product_edit_stock",
+                    {"product_id": int(pid)},
+                )
+                await self.send(
+                    chat,
+                    f"📦 موجودی جدید محصول #{pid} را بفرست:",
+                    buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+                )
+        elif action.startswith("admin_product_move:"):
+            parts = action.removeprefix("admin_product_move:").split(":")
+            if len(parts) == 2 and parts[0].isdigit():
+                await self.db.move_catalogue_item(
+                    "products", int(parts[0]), parts[1]
+                )
+                await self.product_open(event, int(parts[0]))
+        elif action.startswith("admin_product_delete:"):
+            pid = action.removeprefix("admin_product_delete:")
+            if pid.isdigit():
+                await self.db.pool.execute(
+                    "UPDATE products SET active=false WHERE id=$1", int(pid)
+                )
+                await self.send(chat, f"✅ محصول #{pid} غیرفعال شد.")
+                await self.products_manage_home(event)
+        elif action == "admin_categories":
+            await self.categories_manage_home(event)
+        elif action == "admin_category_add":
+            await self.category_add_start(event)
+        elif action.startswith("admin_category_toggle:"):
+            cid = action.removeprefix("admin_category_toggle:")
+            if cid.isdigit():
+                await self.db.pool.execute(
+                    "UPDATE categories SET active=NOT active WHERE id=$1", int(cid)
+                )
+                await self.categories_manage_home(event)
+        elif action.startswith("admin_category_del:"):
+            cid = action.removeprefix("admin_category_del:")
+            if cid.isdigit():
+                await self.db.pool.execute(
+                    "UPDATE categories SET active=false WHERE id=$1", int(cid)
+                )
+                await self.categories_manage_home(event)
         elif action == "admin_finance":
             values = {
                 key: await self.db.setting(key, "")
@@ -2013,35 +2421,52 @@ class Router:
                 f"کارت: {masked_card}\n"
                 f"دارنده: {values['card_holder'] or '—'}\n"
                 f"بانک: {values['card_bank'] or '—'}\n\n"
-                "برای تغییر وضعیت، دکمه‌ها را بزن:",
+                "همه تنظیمات با دکمه قابل تغییرند:",
                 buttons=inline(
                     [
                         [
                             (
                                 "admin_toggle:payments_enabled",
-                                ("🔴 فروش غیرفعال" if values["payments_enabled"] == "1"
-                                 else "🟢 فروش فعال"),
+                                (
+                                    "🔴 پرداخت غیرفعال"
+                                    if values["payments_enabled"] == "1"
+                                    else "🟢 پرداخت فعال"
+                                ),
                             )
                         ],
                         [
                             (
                                 "admin_toggle:zarinpal_enabled",
-                                ("🔴 زرین‌پال غیرفعال" if values["zarinpal_enabled"] == "1"
-                                 else "🟢 زرین‌پال فعال"),
+                                (
+                                    "🔴 زرین‌پال غیرفعال"
+                                    if values["zarinpal_enabled"] == "1"
+                                    else "🟢 زرین‌پال فعال"
+                                ),
                             )
                         ],
                         [
                             (
                                 "admin_toggle:card_enabled",
-                                ("🔴 کارت غیرفعال" if values["card_enabled"] == "1"
-                                 else "🟢 کارت فعال"),
+                                (
+                                    "🔴 کارت غیرفعال"
+                                    if values["card_enabled"] == "1"
+                                    else "🟢 کارت فعال"
+                                ),
                             )
                         ],
+                        [("admin_edit:zarinpal_merchant_id", "✏️ مرچنت زرین‌پال")],
+                        [("admin_edit:card_number", "✏️ شماره کارت")],
+                        [("admin_edit:card_holder", "✏️ نام دارنده")],
+                        [("admin_edit:card_bank", "✏️ بانک")],
+                        [("admin_edit:usd_toman_rate", "✏️ نرخ دلار")],
                         [("admin_fx", "💵 نرخ و سود")],
                         [("admin_sync_prices", "🔄 بروزرسانی قیمت جم")],
+                        [("admin_cred_pricing", "💱 قیمت‌گذاری جم با اطلاعات")],
                     ]
                 ),
             )
+        elif action.startswith("admin_edit:"):
+            await self.finance_edit_start(event, action.removeprefix("admin_edit:"))
         elif action.startswith("admin_toggle:"):
             key = action.removeprefix("admin_toggle:")
             allowed_toggle = {
@@ -2058,7 +2483,9 @@ class Router:
             await self.db.set_setting(key, new_value)
             await self.db.audit(event["sender_id"], "setting", details=f"{key}={new_value}")
             await self.send(chat, f"✅ تنظیم {key} به {new_value} تغییر کرد.")
-            await self.admin(event, "admin_finance")
+            await self.admin(
+                event, "admin_settings" if key == "sales_enabled" else "admin_finance"
+            )
         elif action == "admin_codes":
             rows = await self.db.pool.fetch(
                 """SELECT id,code,code_type,value,used_count,max_uses,active
@@ -2129,13 +2556,19 @@ class Router:
                                  else "🟢 فروش فعال"),
                             )
                         ],
-                        [
-                            (
-                                "admin_settings_text",
-                                "✏️ ویرایش متن پیام‌ها",
-                            )
+                        [("admin_settings_text", "✏️ ویرایش متن پیام‌ها")],
+                        [("admin_channel_add", "📢 افزودن کانال اجباری")],
+                        [("admin_department_add", "🏷 افزودن دپارتمان")],
+                        *[
+                            [(f"admin_channel_del:{row['id']}", f"🗑 کانال #{row['id']}")]
+                            for row in channels[:10]
+                        ],
+                        *[
+                            [(f"admin_department_del:{row['id']}", f"🗑 دپارتمان #{row['id']}")]
+                            for row in departments[:10]
                         ],
                         [("admin_admins", "👮 مدیریت مدیران")],
+                        [("admin_search", "🔎 جستجو")],
                     ]
                 ),
             )
@@ -2146,17 +2579,39 @@ class Router:
             await self.send(
                 chat,
                 "✏️ ویرایش متن پیام‌ها\n"
-                "برای ویرایش هر متن، دستور زیر را بفرست:\n\n"
-                f"متن خوش‌آمد:\n`{welcome[:80] or '—'}`\n"
-                f"→ /setting welcome_text متن\n\n"
-                f"متن راهنما:\n`{help_text[:80] or '—'}`\n"
-                f"→ /setting help_text متن\n\n"
-                f"پیام پشتیبانی:\n`{support_prompt[:80] or '—'}`\n"
-                f"→ /setting support_prompt متن",
-                buttons=inline([[("admin_settings", "🔙 بازگشت")]]),
+                f"خوش‌آمد: {(welcome or '—')[:80]}\n"
+                f"راهنما: {(help_text or '—')[:80]}\n"
+                f"پشتیبانی: {(support_prompt or '—')[:80]}\n\n"
+                "روی دکمه موردنظر بزن و متن جدید را بفرست:",
+                buttons=inline(
+                    [
+                        [("admin_edit:welcome_text", "✏️ متن خوش‌آمد")],
+                        [("admin_edit:help_text", "✏️ متن راهنما")],
+                        [("admin_edit:support_prompt", "✏️ پیام پشتیبانی")],
+                        [("admin_settings", "🔙 بازگشت")],
+                    ]
+                ),
             )
         elif action == "admin_search":
-            await self.send(chat, self.admin_help(action))
+            await self.search_start(event)
+        elif action == "admin_channel_add":
+            await self.channel_add_start(event)
+        elif action == "admin_department_add":
+            await self.department_add_start(event)
+        elif action.startswith("admin_channel_del:"):
+            cid = action.removeprefix("admin_channel_del:")
+            if cid.isdigit():
+                await self.db.pool.execute(
+                    "UPDATE forced_channels SET active=false WHERE id=$1", int(cid)
+                )
+                await self.admin(event, "admin_settings")
+        elif action.startswith("admin_department_del:"):
+            did = action.removeprefix("admin_department_del:")
+            if did.isdigit():
+                await self.db.pool.execute(
+                    "UPDATE departments SET active=false WHERE id=$1", int(did)
+                )
+                await self.admin(event, "admin_settings")
         elif action == "admin_broadcast":
             await self.db.set_session(
                 event["sender_id"],
@@ -2288,6 +2743,22 @@ class Router:
                 "سپس یک عنوان برای او بنویس.",
                 buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
             )
+        elif action == "admin_add_cred_admin":
+            if event["sender_id"] != self.config.admin_id:
+                await self.send(chat, "⛔️ فقط مالک اصلی می‌تواند پشتیبان اضافه کند.")
+                return
+            await self.db.set_session(
+                event["sender_id"],
+                "admin_add_cred_admin",
+                {},
+            )
+            await self.send(
+                chat,
+                "🔐 شناسه روبیکای پشتیبان جم با اطلاعات را بفرست (فرمت `u0...`):\n"
+                "سپس یک عنوان بنویس.\n"
+                "مثال: `u0xxxx پشتیبانی جم`",
+                buttons=inline([[("admin_cancel_broadcast", "✖️ انصراف")]]),
+            )
         elif action.startswith("admin_remove:"):
             if event["sender_id"] != self.config.admin_id:
                 await self.send(chat, "⛔️ فقط مالک اصلی می‌تواند مدیر حذف کند.")
@@ -2316,9 +2787,16 @@ class Router:
         else:
             await self.send(chat, self.admin_help(action))
 
-    async def handle_admin_action(self, event, action):
+    async def handle_admin_action(self, event, action, *, credential_only: bool = False):
         chat = event["chat_id"]
         admin_id = event["sender_id"]
+        if credential_only and not (
+            action.startswith("ticket:")
+            or action.startswith("ticket_close:")
+            or action.startswith("ticket_reply:")
+        ):
+            await self.send(chat, "⛔️ این عملیات برای نقش پشتیبان جم با اطلاعات مجاز نیست.")
+            return
         receipt_match = re.fullmatch(
             r"receipt_(?:review|ok|no):(ok|no):?([1-9]\d*)",
             action,
@@ -2441,6 +2919,9 @@ class Router:
             if not ticket:
                 await self.send(chat, "تیکت پیدا نشد.")
                 return
+            if credential_only and str(ticket.get("category") or "bot") != "credential":
+                await self.send(chat, "⛔️ فقط تیکت‌های جم با اطلاعات برای شما باز است.")
+                return
             messages = await self.db.pool.fetch(
                 """SELECT sender_type,text,created_at FROM ticket_messages
                    WHERE ticket_id=$1 ORDER BY id LIMIT 50""",
@@ -2456,16 +2937,31 @@ class Router:
                 f"کاربر: {ticket['rubika_id']}\n"
                 f"دپارتمان: {ticket['department']}\n"
                 f"وضعیت: {ticket['status']}\n\n"
-                f"{transcript or 'پیامی ثبت نشده.'}\n\n"
-                f"پاسخ: /reply {ticket_id} متن",
+                f"{transcript or 'پیامی ثبت نشده.'}",
                 buttons=inline(
-                    [[(f"ticket_close:{ticket_id}", "✅ بستن تیکت")]]
+                    [
+                        [(f"ticket_reply:{ticket_id}", "💬 پاسخ")],
+                        [(f"ticket_close:{ticket_id}", "✅ بستن تیکت")],
+                    ]
                 ),
+            )
+            return
+        reply_match = re.fullmatch(r"ticket_reply:([1-9]\d*)", action)
+        if reply_match:
+            await self.ticket_reply_start(
+                event, int(reply_match.group(1)), credential_only=credential_only
             )
             return
         close_match = re.fullmatch(r"ticket_close:([1-9]\d*)", action)
         if close_match:
             ticket_id = int(close_match.group(1))
+            if credential_only:
+                category = await self.db.pool.fetchval(
+                    "SELECT category FROM tickets WHERE id=$1", ticket_id
+                )
+                if str(category or "bot") != "credential":
+                    await self.send(chat, "⛔️ فقط تیکت‌های جم با اطلاعات برای شما باز است.")
+                    return
             changed = await self.db.pool.execute(
                 """UPDATE tickets SET status='closed',updated_at=now()
                    WHERE id=$1 AND status='open'""",
@@ -2476,9 +2972,29 @@ class Router:
                 "✅ تیکت بسته شد." if changed.endswith("1") else "این تیکت قبلاً بسته شده است.",
             )
             return
+        if credential_only:
+            await self.send(chat, "⛔️ این عملیات برای نقش پشتیبان جم با اطلاعات مجاز نیست.")
+            return
         complete_match = re.fullmatch(r"order_complete:([1-9]\d*)", action)
         if complete_match:
             order_id = int(complete_match.group(1))
+            cred = await self.db.get_credential_order(order_id)
+            if cred:
+                try:
+                    await self.db.complete_credential_order(order_id)
+                except ValueError as exc:
+                    await self.send(chat, f"❌ {exc}")
+                    return
+                if cred["chat_id"]:
+                    await self.api.send_message(
+                        cred["chat_id"],
+                        f"✅ سفارش #{order_id} تکمیل و تحویل شد.\n"
+                        "برای امنیت، رمز اکانت را عوض کن.",
+                        chat_keypad=main_menu(),
+                    )
+                await self.db.audit(admin_id, "order_complete", details=str(order_id))
+                await self.send(chat, f"✅ سفارش #{order_id} تکمیل شد.")
+                return
             row = await self.db.pool.fetchrow(
                 """UPDATE orders SET status='completed'
                    WHERE id=$1 AND status IN ('paid','processing')
@@ -2508,45 +3024,45 @@ class Router:
 
     def admin_help(self, section):
         docs = {
-            "admin_products": "/product_add kind|title|price|stock|amount|sku|cost_usd\n/product_edit id|field|value\n/product_move id|up|down|first|last\nفیلدهای قابل ویرایش شامل category_id و sort_order هم هستند.\n/product_delete id",
-            "admin_categories": "/category_add title\n/category_move id|up|down|first|last\n/category_delete id",
-            "admin_finance": "/setting payments_enabled 1|0\n/setting zarinpal_enabled 1|0\n/setting zarinpal_merchant_id UUID\n/setting card_enabled 1|0\n/setting card_number NUMBER\n/setting card_holder NAME\n/setting card_bank BANK\n/setting usd_toman_rate NUMBER",
-            "admin_search": "/user شناسه\n/order شماره",
-            "admin_broadcast": "/broadcast متن پیام",
-            "admin_codes": "/code_add gift|CODE|VALUE|MAX\n/code_add discount|CODE|PERCENT|MAX\n/code_delete ID",
-            "admin_settings": "/setting sales_enabled 1|0\n/setting welcome_text TEXT\n/setting help_text TEXT\n/setting support_prompt TEXT\n/channel_add CHAT|TITLE|URL\n/channel_delete ID\n/department_add TITLE\n/department_delete ID",
-            "admin_admins": "این بخش فقط برای مالک اصلی است.\n/admin_add ID TITLE\n/admin_delete ID\n/admin_clear",
+            "admin_products": "از دکمه «افزودن محصول» و باز کردن هر محصول برای ویرایش استفاده کن.",
+            "admin_categories": "از دکمه «افزودن دسته» و دکمه‌های فعال/حذف استفاده کن.",
+            "admin_finance": "همه تنظیمات مالی از دکمه‌های همین بخش قابل تغییرند.",
+            "admin_search": "شناسه روبیکا یا شماره سفارش را بفرست.",
+            "admin_broadcast": "متن پیام همگانی را بفرست.",
+            "admin_codes": "از دکمه افزودن/حذف کد استفاده کن.",
+            "admin_settings": "متن‌ها، کانال و دپارتمان را با دکمه مدیریت کن.",
+            "admin_admins": "با دکمه، مدیر یا پشتیبان جم با اطلاعات اضافه/حذف کن.",
         }
-        return "راهنمای این بخش:\n" + docs.get(section, "دستور این بخش تعریف نشده است.")
+        return "راهنما:\n" + docs.get(section, "از دکمه‌های پنل استفاده کن.")
 
-    async def admin_command(self, event, command):
+    async def admin_command(self, event, command, *, credential_only: bool = False):
         admin_id, chat = event["sender_id"], event["chat_id"]
         name, _, args = command.partition(" ")
+        if credential_only and name not in {"/reply", "/credadmin"}:
+            await self.send(
+                chat,
+                "⛔️ از دکمه‌های پنل جم با اطلاعات استفاده کن.",
+            )
+            return
         try:
+            if name == "/credadmin":
+                await self.credadmin_home(event)
+                return
             if name == "/reply":
+                # سازگاری قدیمی؛ مسیر اصلی دکمه «💬 پاسخ» است.
                 ticket_id, text = args.split(" ", 1)
                 if not text.strip():
                     raise ValueError("متن پاسخ خالی است.")
-                row = await self.db.pool.fetchrow(
-                    """SELECT t.id,u.chat_id FROM tickets t JOIN users u ON u.id=t.user_id
-                       WHERE t.id=$1""",
-                    int(ticket_id),
+                fake = dict(event)
+                fake["text"] = text
+                await self.ticket_reply_receive(
+                    fake,
+                    {
+                        "ticket_id": int(ticket_id),
+                        "credential_only": credential_only,
+                    },
                 )
-                if not row:
-                    raise ValueError("تیکت پیدا نشد.")
-                await self.db.pool.execute(
-                    """INSERT INTO ticket_messages(ticket_id,sender_type,sender_id,text)
-                       VALUES($1,'admin',$2,$3)""",
-                    int(ticket_id),
-                    admin_id,
-                    text[:4000],
-                )
-                await self.db.pool.execute(
-                    "UPDATE tickets SET updated_at=now() WHERE id=$1", int(ticket_id)
-                )
-                await self.api.send_message(
-                    row["chat_id"], f"🎧 پاسخ پشتیبانی #{ticket_id}\n{text}"
-                )
+                return
             elif name in {"/receipt_ok", "/receipt_no"}:
                 receipt_arg = args.strip()
                 if not receipt_arg.isdigit() or int(receipt_arg) <= 0:
@@ -2583,6 +3099,12 @@ class Router:
                     "card_holder",
                     "card_bank",
                     "usd_toman_rate",
+                    "credential_support_id",
+                    "credential_weekly_profit_percent",
+                    "credential_monthly_profit_percent",
+                    "credential_weekly_cost_usd",
+                    "credential_monthly_cost_usd",
+                    "gem_profit_percent",
                 }
                 if key not in allowed:
                     raise ValueError("کلید تنظیمات مجاز نیست.")
@@ -2636,6 +3158,15 @@ class Router:
                     rubika_id,
                     title,
                 )
+            elif name == "/credadmin_add":
+                if admin_id != self.config.admin_id:
+                    raise ValueError("افزودن پشتیبان جم با اطلاعات فقط برای مالک است.")
+                rubika_id, _, title = args.partition(" ")
+                rubika_id, title = rubika_id.strip(), title.strip()
+                if not re.fullmatch(r"u0[A-Za-z0-9]{10,80}", rubika_id):
+                    raise ValueError("شناسه داخلی روبیکا معتبر نیست.")
+                await self.owner_add_credential_admin(event, rubika_id, title)
+                return
             elif name == "/admin_delete":
                 if admin_id != self.config.admin_id:
                     raise ValueError("مدیریت مدیران فقط در اختیار مالک اصلی ربات است.")
@@ -2654,7 +3185,7 @@ class Router:
             elif name == "/product_add":
                 kind, title, price, stock, amount, sku, cost = args.split("|", 6)
                 kind = kind.strip()
-                if kind not in {"gem", "sense_mobile", "sense_pc", "store"}:
+                if kind not in {"gem", "sense_mobile", "sense_pc", "store", "gem_credentials"}:
                     raise ValueError("نوع محصول مجاز نیست.")
                 if not title.strip():
                     raise ValueError("عنوان محصول خالی است.")
@@ -2996,7 +3527,9 @@ class Router:
         user = await self.db.pool.fetchrow("SELECT chat_id FROM users WHERE id=$1", user_id)
         await self.api.send_message(
             user["chat_id"],
-            "✅ عضویت تأیید شد؛ /start را بزن." if approved else "❌ عضویت تأیید نشد.",
+            "✅ عضویت تأیید شد؛ از منوی پایین شروع کن."
+            if approved
+            else "❌ عضویت تأیید نشد.",
         )
 
     async def review_receipt(self, admin_id, receipt_id, approved):

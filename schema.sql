@@ -466,6 +466,61 @@ BEGIN
   END IF;
 END $package_titles$;
 
+-- ─── جم با اطلاعات (parity با تلگرام) ───────────────────────────────────────
+ALTER TABLE products DROP CONSTRAINT IF EXISTS products_kind_check;
+ALTER TABLE products
+  ADD CONSTRAINT products_kind_check
+  CHECK (kind IN ('gem','sense_mobile','sense_pc','store','gem_credentials'));
+
+CREATE TABLE IF NOT EXISTS credential_orders (
+  order_id BIGINT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+  login_method TEXT NOT NULL DEFAULT '',
+  ciphertext TEXT NOT NULL DEFAULT '',
+  two_factor BOOLEAN NOT NULL DEFAULT false,
+  cred_status TEXT NOT NULL DEFAULT 'awaiting_payment',
+  viewed_at TIMESTAMPTZ,
+  deleted_at TIMESTAMPTZ,
+  admin_note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_credential_orders_status
+  ON credential_orders(cred_status);
+
+ALTER TABLE tickets
+  ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'bot';
+ALTER TABLE tickets
+  ADD COLUMN IF NOT EXISTS related_order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL;
+
+INSERT INTO settings(key,value) VALUES
+  ('credential_support_id',''),
+  ('credential_weekly_profit_percent','40'),
+  ('credential_monthly_profit_percent','40'),
+  ('credential_weekly_cost_usd','1.328'),
+  ('credential_monthly_cost_usd','6.64')
+ON CONFLICT(key) DO NOTHING;
+
+DO $cred_products$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings WHERE key='credential_products_seed_v1'
+  ) THEN
+    INSERT INTO products(kind,title,description,amount,price,stock,active,supplier_sku)
+    SELECT 'gem_credentials','📅 عضویت هفتگی (جم با اطلاعات)',
+      'تحویل دستی با اطلاعات ورود اکانت — هفتگی',60,500000,9999,true,'cred_weekly'
+    WHERE NOT EXISTS (
+      SELECT 1 FROM products WHERE kind='gem_credentials' AND supplier_sku='cred_weekly'
+    );
+    INSERT INTO products(kind,title,description,amount,price,stock,active,supplier_sku)
+    SELECT 'gem_credentials','📆 عضویت ماهانه (جم با اطلاعات)',
+      'تحویل دستی با اطلاعات ورود اکانت — ماهانه',300,2000000,9999,true,'cred_monthly'
+    WHERE NOT EXISTS (
+      SELECT 1 FROM products WHERE kind='gem_credentials' AND supplier_sku='cred_monthly'
+    );
+    INSERT INTO settings(key,value) VALUES('credential_products_seed_v1','1')
+    ON CONFLICT(key) DO UPDATE SET value='1',updated_at=now();
+  END IF;
+END $cred_products$;
+
 -- Older versions retried provider calls automatically. Their outcome may be
 -- ambiguous, so quarantine them for reconciliation instead of resubmitting.
 UPDATE fulfillments
