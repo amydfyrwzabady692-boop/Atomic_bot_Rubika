@@ -517,6 +517,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('"pending"', source)
         self.assertIn('"expired"', source)
 
+    def test_default_support_ids_are_public_handles(self):
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        schema_source = (ROOT / "schema.sql").read_text(encoding="utf-8")
+        self.assertIn("@omid_1797", database_source)
+        self.assertIn("@lookurback", database_source)
+        self.assertIn("('support_id','@omid_1797')", schema_source)
+        self.assertIn("('credential_support_id','@lookurback')", schema_source)
+
     def test_supplier_cost_math_uses_decimal_rounding(self):
         self.assertEqual(str(checked_decimal("0.935")), "0.935000")
         self.assertEqual(supplier_cost_toman("0.935", 100_001), 93_501)

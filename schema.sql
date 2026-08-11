@@ -277,7 +277,7 @@ INSERT INTO settings(key,value) VALUES
  ('welcome_text','✨ به اتومیک شاپ روبیکا خوش اومدی! ✨'),
  ('help_text',''),
  ('support_prompt',''),
- ('support_id',''),
+ ('support_id','@omid_1797'),
  ('sales_enabled','1'),
  ('payments_enabled','1'),
  ('zarinpal_enabled','1'),
@@ -492,13 +492,21 @@ ALTER TABLE tickets
   ADD COLUMN IF NOT EXISTS related_order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL;
 
 INSERT INTO settings(key,value) VALUES
-  ('credential_support_id',''),
+  ('credential_support_id','@lookurback'),
   ('credential_profit_percent','40'),
   ('credential_weekly_profit_percent','40'),
   ('credential_monthly_profit_percent','40'),
   ('credential_weekly_cost_usd','1.328'),
   ('credential_monthly_cost_usd','6.64')
 ON CONFLICT(key) DO NOTHING;
+
+-- اگر خالی یا شناسه داخلی روبیکا بود، آیدی عمومی درست را بگذار (ادمین بعداً از پنل عوض می‌کند)
+UPDATE settings SET value='@omid_1797', updated_at=now()
+ WHERE key='support_id'
+   AND (COALESCE(TRIM(value),'')='' OR value ~* '^u0');
+UPDATE settings SET value='@lookurback', updated_at=now()
+ WHERE key='credential_support_id'
+   AND (COALESCE(TRIM(value),'')='' OR value ~* '^u0');
 
 DO $cred_products$
 BEGIN

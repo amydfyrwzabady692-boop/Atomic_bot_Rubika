@@ -1163,17 +1163,25 @@ class Database:
 
     async def get_support_contact(self):
         """آیدی پشتیبانی عمومی (جم با آیدی / کلی) — قابل تنظیم از پنل."""
-        raw = str(await self.setting("support_id", "") or "").strip()
+        raw = str(await self.setting("support_id", "@omid_1797") or "@omid_1797").strip()
         if raw:
             return {"handle": raw, "display": raw, "rubika_id": raw}
-        return {"handle": "", "display": "پشتیبانی", "rubika_id": ""}
+        return {"handle": "@omid_1797", "display": "@omid_1797", "rubika_id": "@omid_1797"}
 
     async def get_credential_support_contact(self):
         """آیدی پشتیبانی جم با اطلاعات — فقط مقدار تنظیم‌شده در پنل (نه شناسه داخلی u0…)."""
-        raw = str(await self.setting("credential_support_id", "") or "").strip()
+        raw = str(
+            await self.setting("credential_support_id", "@lookurback") or "@lookurback"
+        ).strip()
+        if raw.lower().startswith("u0"):
+            raw = "@lookurback"
         if raw:
             return {"handle": raw, "display": raw, "rubika_id": raw}
-        return {"handle": "", "display": "پشتیبانی", "rubika_id": ""}
+        return {
+            "handle": "@lookurback",
+            "display": "@lookurback",
+            "rubika_id": "@lookurback",
+        }
 
     async def create_credential_order(
         self,
