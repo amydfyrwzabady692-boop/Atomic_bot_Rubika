@@ -1161,15 +1161,15 @@ class Database:
         except (TypeError, ValueError):
             return None
 
+    async def get_support_contact(self):
+        """آیدی پشتیبانی عمومی (جم با آیدی / کلی) — قابل تنظیم از پنل."""
+        raw = str(await self.setting("support_id", "") or "").strip()
+        if raw:
+            return {"handle": raw, "display": raw, "rubika_id": raw}
+        return {"handle": "", "display": "پشتیبانی", "rubika_id": ""}
+
     async def get_credential_support_contact(self):
-        staff = await self.list_credential_admins()
-        if staff:
-            rid = str(staff[0]["rubika_id"])
-            return {
-                "handle": rid,
-                "display": rid,
-                "rubika_id": rid,
-            }
+        """آیدی پشتیبانی جم با اطلاعات — فقط مقدار تنظیم‌شده در پنل (نه شناسه داخلی u0…)."""
         raw = str(await self.setting("credential_support_id", "") or "").strip()
         if raw:
             return {"handle": raw, "display": raw, "rubika_id": raw}

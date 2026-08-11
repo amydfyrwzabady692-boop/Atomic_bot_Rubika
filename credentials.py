@@ -105,7 +105,7 @@ BACKUP_FOOTER = (
     "✅ اگر کد را پیدا کردی → همین‌جا بفرست\n"
     "🆘 اگر بلد نیستی / پیدا نکردی → دکمه زیر را بزن:\n"
     "«نیاز به راهنمایی — بک‌آپ بلد نیستم»\n"
-    "بعد پرداخت کن؛ پس از پرداخت موفق پشتیبانی با شماره سفارش کمکت می‌کند."
+    "بعد پرداخت کن؛ پس از پرداخت موفق دسترسی به آیدی پشتیبان باز می‌شود."
 )
 
 
@@ -135,7 +135,6 @@ class CredentialHandlers:
 
     async def credential_products_menu(self, event):
         products = await self.db.products("gem_credentials")
-        support = await self.db.get_credential_support_contact()
         text = (
             "🔐 جم با اطلاعات اکانت\n"
             "━━━━━━━━━━━━━━━\n"
@@ -143,9 +142,8 @@ class CredentialHandlers:
             "بعد از انتخاب: روش ورود ← شناسه ← رمز ← راهنمای بک‌آپ "
             "(اگر بلد نیستی دکمه راهنمایی را بزن).\n\n"
             "راهنمای گرفتن بک‌آپ برای Gmail / Facebook / VK داخل چت می‌آید.\n"
+            "🔒 بعد از پرداخت، دسترسی به آیدی پشتیبان باز می‌شود."
         )
-        if support["handle"]:
-            text += f"اگر بعد از پرداخت هنوز مشکل داشتی، به {support['handle']} پیام بده."
         rows = []
         for product in products:
             rows.append(
@@ -171,7 +169,6 @@ class CredentialHandlers:
             return
         sku = str(product.get("supplier_sku") or "")
         plan = "هفتگی" if "weekly" in sku else "ماهانه"
-        support = await self.db.get_credential_support_contact()
         text = (
             f"🔐 {product['title']}\n"
             "━━━━━━━━━━━━━━━\n"
@@ -183,10 +180,9 @@ class CredentialHandlers:
             "۲) شناسه ورود\n"
             "۳) رمز عبور\n"
             "۴) راهنمای بک‌آپ (اگر بلد نیستی: نیاز به راهنمایی)\n"
-            "۵) پرداخت\n"
+            "۵) پرداخت\n\n"
+            "🔒 بعد از پرداخت، دسترسی به آیدی پشتیبان باز می‌شود."
         )
-        if support["handle"]:
-            text += f"\nاگر بعد از پرداخت مشکل داشتی: {support['handle']}"
         await self.send(
             event["chat_id"],
             text,
@@ -462,12 +458,15 @@ class CredentialHandlers:
     async def send_user_post_pay_credential_help(self, chat_id: str, order_id: int):
         support = await self.db.get_credential_support_contact()
         text = (
-            f"🆘 نیاز به راهنمایی بک‌آپ کد؟\n"
-            f"پرداخت سفارش #{order_id} ثبت شد.\n"
-            f"اگر بک‌آپ بلد نیستی یا کار نمی‌کند، تیکت بزن و شماره سفارش را بنویس.\n"
+            f"✅ پرداخت سفارش #{order_id} ثبت شد.\n"
+            "━━━━━━━━━━━━━━━\n"
+            "اگر بک‌آپ بلد نیستی یا کار نمی‌کند، به آیدی پشتیبان پیام بده "
+            "و شماره سفارش را بنویس.\n"
         )
         if support["handle"]:
-            text += f"\nپشتیبانی: {support['handle']}"
+            text += f"\n🎧 آیدی پشتیبان جم با اطلاعات:\n{support['handle']}"
+        else:
+            text += "\nاز دکمه زیر تیکت راهنمایی باز کن."
         await self.api.send_message(
             chat_id,
             text,
@@ -801,12 +800,17 @@ class CredentialHandlers:
         await self.db.add_admin(
             rubika_id, title=title or "پشتیبان جم با اطلاعات", role="credential"
         )
-        await self.db.set_setting("credential_support_id", rubika_id)
+        public_id = str(await self.db.setting("credential_support_id", "") or "").strip()
+        note = (
+            f"آیدی عمومی مشتری: {public_id}"
+            if public_id
+            else "آیدی عمومی مشتری هنوز تنظیم نشده — از ⚙️ تنظیمات → آیدی‌های پشتیبانی ست کن."
+        )
         await self.send(
             event["chat_id"],
             f"✅ پشتیبان جم با اطلاعات ثبت شد.\n"
-            f"شناسه: {rubika_id}\n"
-            f"آیدی پشتیبانی این بخش هم همین شد.\n"
+            f"شناسه پنل: {rubika_id}\n"
+            f"{note}\n"
             "به او بگو از دکمه «پنل جم با اطلاعات» استفاده کند.",
             menu=admin_menu(),
         )

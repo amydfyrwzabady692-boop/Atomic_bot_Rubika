@@ -314,7 +314,8 @@ class AdminFlowHandlers:
             "welcome_text": "متن خوش‌آمد",
             "help_text": "متن راهنما",
             "support_prompt": "متن شروع پشتیبانی",
-            "credential_support_id": "شناسه پشتیبانی جم با اطلاعات",
+            "support_id": "آیدی پشتیبانی عمومی (جم با آیدی / کلی)",
+            "credential_support_id": "آیدی پشتیبانی جم با اطلاعات (برای مشتری)",
         }
         if key not in labels:
             await self.send(event["chat_id"], "کلید نامعتبر است.")
@@ -388,14 +389,21 @@ class AdminFlowHandlers:
             await self.admin_pricing_home(event, with_menu=False)
         elif key in {"welcome_text", "help_text", "support_prompt"}:
             await self.admin(event, "admin_settings")
-        elif key == "credential_support_id":
-            await self.admin(event, "admin_admins")
+        elif key in {"support_id", "credential_support_id"}:
+            await self.admin(event, "admin_support_ids")
 
     async def _validate_setting_value(self, key: str, value: str):
         if key.endswith("_enabled") and value not in {"0", "1"}:
             raise ValueError("فقط 0 یا 1")
         if key in {"welcome_text", "help_text", "support_prompt"} and not value:
             raise ValueError("متن نمی‌تواند خالی باشد.")
+        if key in {"support_id", "credential_support_id"}:
+            cleaned = value.lstrip("@").strip()
+            if not cleaned or len(cleaned) > 64:
+                raise ValueError("آیدی پشتیبانی معتبر نیست.")
+            # اجازه بده ادمین همان چیزی که مشتری باید ببیند را ذخیره کند
+            # (یوزرنیم، شناسه عددی، یا u0…)
+            return value.strip()
         if key == "zarinpal_merchant_id":
             try:
                 uuid.UUID(value)

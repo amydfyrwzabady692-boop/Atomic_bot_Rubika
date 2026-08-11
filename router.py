@@ -1779,9 +1779,18 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         )
 
     async def ask_support(self, event):
+        support = await self.db.get_support_contact()
         departments = await self.db.pool.fetch(
             "SELECT id,title FROM departments WHERE active ORDER BY id"
         )
+        header = "🎧 پشتیبانی Atomic\n━━━━━━━━━━━━━━━\n"
+        if support["handle"]:
+            header += (
+                f"آیدی پشتیبانی (پیام مستقیم):\n{support['handle']}\n\n"
+                "یا از طریق تیکت داخل ربات پیام بفرست.\n"
+            )
+        else:
+            header += "پیامت را از طریق تیکت داخل ربات بفرست.\n"
         if not departments:
             await self.db.set_session(
                 event["sender_id"],
@@ -1794,13 +1803,13 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             )
             await self.send(
                 event["chat_id"],
-                prompt or "پیام خودت را برای پشتیبانی بنویس:",
+                header + "\n" + (prompt or "پیام خودت را برای پشتیبانی بنویس:"),
                 buttons=inline([[("support_cancel", "✖️ انصراف")]]),
             )
             return
         await self.send(
             event["chat_id"],
-            "دپارتمان پشتیبانی را انتخاب کن:",
+            header + "\nدپارتمان پشتیبانی را انتخاب کن:",
             buttons=inline(
                 [
                     [(f"support_dept:{row['id']}", row["title"])]
@@ -3260,6 +3269,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                             )
                         ],
                         [("admin_settings_text", "✏️ ویرایش متن پیام‌ها")],
+                        [("admin_support_ids", "🎧 آیدی‌های پشتیبانی")],
                         [("admin_channel_add", "📢 افزودن کانال اجباری")],
                         [("admin_department_add", "🏷 افزودن دپارتمان")],
                         *[
@@ -3291,6 +3301,32 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                         [("admin_edit:welcome_text", "✏️ متن خوش‌آمد")],
                         [("admin_edit:help_text", "✏️ متن راهنما")],
                         [("admin_edit:support_prompt", "✏️ پیام پشتیبانی")],
+                        [("admin_settings", "🔙 بازگشت")],
+                    ]
+                ),
+            )
+        elif action == "admin_support_ids":
+            general = await self.db.get_support_contact()
+            cred = await self.db.get_credential_support_contact()
+            await self.send(
+                chat,
+                "🎧 آیدی‌های پشتیبانی\n"
+                "━━━━━━━━━━━━━━━\n"
+                "این آیدی‌ها را خودت انتخاب کن تا مشتری بتواند پیام بدهد.\n\n"
+                f"💎 پشتیبانی عمومی / جم با آیدی:\n"
+                f"{general['handle'] or 'تنظیم نشده'}\n\n"
+                f"🔐 پشتیبانی جم با اطلاعات:\n"
+                f"{cred['handle'] or 'تنظیم نشده'}\n\n"
+                "⚠️ آیدی جم با اطلاعات فقط بعد از پرداخت به مشتری نشان داده می‌شود.",
+                buttons=inline(
+                    [
+                        [("admin_edit:support_id", "✏️ آیدی پشتیبانی عمومی")],
+                        [
+                            (
+                                "admin_edit:credential_support_id",
+                                "✏️ آیدی پشتیبانی جم با اطلاعات",
+                            )
+                        ],
                         [("admin_settings", "🔙 بازگشت")],
                     ]
                 ),
