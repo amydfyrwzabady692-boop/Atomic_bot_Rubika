@@ -500,13 +500,21 @@ INSERT INTO settings(key,value) VALUES
   ('credential_monthly_cost_usd','6.64')
 ON CONFLICT(key) DO NOTHING;
 
--- اگر خالی یا شناسه داخلی روبیکا بود، آیدی عمومی درست را بگذار (ادمین بعداً از پنل عوض می‌کند)
-UPDATE settings SET value='@omid_1797', updated_at=now()
- WHERE key='support_id'
-   AND (COALESCE(TRIM(value),'')='' OR value ~* '^u0');
-UPDATE settings SET value='@lookurback', updated_at=now()
- WHERE key='credential_support_id'
-   AND (COALESCE(TRIM(value),'')='' OR value ~* '^u0');
+-- یک‌بار آیدی‌های عمومی پشتیبانی را روی مقادیر درخواستی ست کن
+DO $support_ids$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM settings WHERE key='support_ids_public_v1'
+  ) THEN
+    INSERT INTO settings(key,value) VALUES
+      ('support_id','@omid_1797'),
+      ('credential_support_id','@lookurback')
+    ON CONFLICT(key) DO UPDATE
+      SET value=EXCLUDED.value, updated_at=now();
+    INSERT INTO settings(key,value) VALUES('support_ids_public_v1','1')
+    ON CONFLICT(key) DO UPDATE SET value='1', updated_at=now();
+  END IF;
+END $support_ids$;
 
 DO $cred_products$
 BEGIN
