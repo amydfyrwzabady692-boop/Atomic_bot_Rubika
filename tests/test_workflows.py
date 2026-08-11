@@ -524,6 +524,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("@lookurback", database_source)
         self.assertIn("('support_id','@omid_1797')", schema_source)
         self.assertIn("('credential_support_id','@lookurback')", schema_source)
+        self.assertIn("_public_support_handle", database_source)
+        self.assertIn("support_ids_public_v2", schema_source)
+
+    def test_public_support_handle_rejects_internal_rubika_ids(self):
+        database = Database("postgresql://unused")
+        self.assertEqual(
+            database._public_support_handle("u0abcdef123456", "@lookurback"),
+            "@lookurback",
+        )
+        self.assertEqual(
+            database._public_support_handle("@lookurback", "@omid_1797"),
+            "@lookurback",
+        )
+        self.assertEqual(
+            database._public_support_handle("omid_1797", "@lookurback"),
+            "@omid_1797",
+        )
 
     def test_supplier_cost_math_uses_decimal_rounding(self):
         self.assertEqual(str(checked_decimal("0.935")), "0.935000")

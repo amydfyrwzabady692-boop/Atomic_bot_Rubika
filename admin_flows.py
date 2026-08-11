@@ -398,12 +398,21 @@ class AdminFlowHandlers:
         if key in {"welcome_text", "help_text", "support_prompt"} and not value:
             raise ValueError("متن نمی‌تواند خالی باشد.")
         if key in {"support_id", "credential_support_id"}:
-            cleaned = value.lstrip("@").strip()
+            cleaned = value.strip()
             if not cleaned or len(cleaned) > 64:
                 raise ValueError("آیدی پشتیبانی معتبر نیست.")
-            # اجازه بده ادمین همان چیزی که مشتری باید ببیند را ذخیره کند
-            # (یوزرنیم، شناسه عددی، یا u0…)
-            return value.strip()
+            if cleaned.lower().startswith("u0") or re.fullmatch(
+                r"u0[A-Za-z0-9]{6,}", cleaned, flags=re.I
+            ):
+                raise ValueError(
+                    "شناسه داخلی روبیکا (u0…) را اینجا نگذار.\n"
+                    "آیدی عمومی قابل پیام مثل @omid_1797 یا @lookurback بفرست."
+                )
+            if not cleaned.startswith("@") and re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_]{2,63}", cleaned
+            ):
+                cleaned = f"@{cleaned}"
+            return cleaned
         if key == "zarinpal_merchant_id":
             try:
                 uuid.UUID(value)

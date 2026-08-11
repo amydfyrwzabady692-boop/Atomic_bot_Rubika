@@ -187,9 +187,11 @@ class Application:
                     "برای اکانت شما واریز شد."
                 )
             else:
+                support = await self.db.get_support_contact()
                 user_text = (
                     f"⚠️ تحویل خودکار سفارش #{row['order_id']} با مشکل روبه‌رو شد. "
-                    "پرداخت شما ثبت است و سفارش برای بررسی ایمن به پشتیبانی ارجاع شد."
+                    "پرداخت شما ثبت است و سفارش برای بررسی ایمن به پشتیبانی ارجاع شد.\n"
+                    f"آیدی پشتیبانی: {support['handle']}"
                 )
             try:
                 if row["chat_id"]:

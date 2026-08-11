@@ -500,21 +500,27 @@ INSERT INTO settings(key,value) VALUES
   ('credential_monthly_cost_usd','6.64')
 ON CONFLICT(key) DO NOTHING;
 
--- یک‌بار آیدی‌های عمومی پشتیبانی را روی مقادیر درخواستی ست کن
+-- اجبار دوباره: آیدی عمومی پشتیبانی (نه شناسه داخلی روبیکا)
 DO $support_ids$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM settings WHERE key='support_ids_public_v1'
+    SELECT 1 FROM settings WHERE key='support_ids_public_v2'
   ) THEN
     INSERT INTO settings(key,value) VALUES
       ('support_id','@omid_1797'),
       ('credential_support_id','@lookurback')
     ON CONFLICT(key) DO UPDATE
       SET value=EXCLUDED.value, updated_at=now();
-    INSERT INTO settings(key,value) VALUES('support_ids_public_v1','1')
+    INSERT INTO settings(key,value) VALUES('support_ids_public_v2','1')
     ON CONFLICT(key) DO UPDATE SET value='1', updated_at=now();
   END IF;
 END $support_ids$;
+
+-- هر مقدار داخلی u0… را برای مشتری‌ها به آیدی عمومی برگردان
+UPDATE settings SET value='@omid_1797', updated_at=now()
+ WHERE key='support_id' AND value ~* '^u0';
+UPDATE settings SET value='@lookurback', updated_at=now()
+ WHERE key='credential_support_id' AND value ~* '^u0';
 
 DO $cred_products$
 BEGIN

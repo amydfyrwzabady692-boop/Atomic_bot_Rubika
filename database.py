@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import asyncpg
@@ -1161,27 +1162,31 @@ class Database:
         except (TypeError, ValueError):
             return None
 
+    def _public_support_handle(self, raw: str, default: str) -> str:
+        """فقط آیدی عمومی قابل نمایش به مشتری — شناسه داخلی روبیکا (u0…) رد می‌شود."""
+        value = str(raw or "").strip()
+        if not value:
+            return default
+        lowered = value.lower()
+        if lowered.startswith("u0") or re.fullmatch(r"u0[A-Za-z0-9]{6,}", value, flags=re.I):
+            return default
+        if not value.startswith("@") and not value.isdigit():
+            # یوزرنیم بدون @ را با @ برگردان
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,63}", value):
+                return f"@{value}"
+        return value
+
     async def get_support_contact(self):
         """آیدی پشتیبانی عمومی (جم با آیدی / کلی) — قابل تنظیم از پنل."""
-        raw = str(await self.setting("support_id", "@omid_1797") or "@omid_1797").strip()
-        if raw:
-            return {"handle": raw, "display": raw, "rubika_id": raw}
-        return {"handle": "@omid_1797", "display": "@omid_1797", "rubika_id": "@omid_1797"}
+        raw = await self.setting("support_id", "@omid_1797")
+        handle = self._public_support_handle(raw, "@omid_1797")
+        return {"handle": handle, "display": handle, "rubika_id": handle}
 
     async def get_credential_support_contact(self):
-        """آیدی پشتیبانی جم با اطلاعات — فقط مقدار تنظیم‌شده در پنل (نه شناسه داخلی u0…)."""
-        raw = str(
-            await self.setting("credential_support_id", "@lookurback") or "@lookurback"
-        ).strip()
-        if raw.lower().startswith("u0"):
-            raw = "@lookurback"
-        if raw:
-            return {"handle": raw, "display": raw, "rubika_id": raw}
-        return {
-            "handle": "@lookurback",
-            "display": "@lookurback",
-            "rubika_id": "@lookurback",
-        }
+        """آیدی پشتیبانی جم با اطلاعات — فقط آیدی عمومی (نه شناسه داخلی u0…)."""
+        raw = await self.setting("credential_support_id", "@lookurback")
+        handle = self._public_support_handle(raw, "@lookurback")
+        return {"handle": handle, "display": handle, "rubika_id": handle}
 
     async def create_credential_order(
         self,

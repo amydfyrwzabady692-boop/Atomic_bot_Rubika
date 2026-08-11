@@ -457,16 +457,14 @@ class CredentialHandlers:
 
     async def send_user_post_pay_credential_help(self, chat_id: str, order_id: int):
         support = await self.db.get_credential_support_contact()
+        handle = support["handle"] or "@lookurback"
         text = (
             f"✅ پرداخت سفارش #{order_id} ثبت شد.\n"
             "━━━━━━━━━━━━━━━\n"
             "اگر بک‌آپ بلد نیستی یا کار نمی‌کند، به آیدی پشتیبان پیام بده "
-            "و شماره سفارش را بنویس.\n"
+            "و شماره سفارش را بنویس.\n\n"
+            f"🎧 آیدی پشتیبان جم با اطلاعات:\n{handle}"
         )
-        if support["handle"]:
-            text += f"\n🎧 آیدی پشتیبان جم با اطلاعات:\n{support['handle']}"
-        else:
-            text += "\nاز دکمه زیر تیکت راهنمایی باز کن."
         await self.api.send_message(
             chat_id,
             text,
@@ -726,14 +724,15 @@ class CredentialHandlers:
             order_id, "اطلاعات ورود صحیح یا کامل نیست."
         )
         support = await self.db.get_credential_support_contact()
+        handle = support["handle"] or "@lookurback"
         row = await self.db.get_credential_order(order_id)
         if row and row["chat_id"]:
             try:
                 await self.api.send_message(
                     row["chat_id"],
                     f"⚠️ اطلاعات سفارش #{order_id} ناقص است.\n"
-                    f"با پشتیبانی ({support['handle'] or 'پشتیبانی'}) "
-                    f"تماس بگیر و شماره سفارش را بفرست.",
+                    f"به آیدی پشتیبان پیام بده و شماره سفارش را بفرست:\n"
+                    f"{handle}",
                     inline_keypad=inline(
                         [[(f"cred_ticket:{order_id}", f"🆘 تیکت سفارش #{order_id}")]]
                     ),

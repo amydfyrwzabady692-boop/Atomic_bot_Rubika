@@ -913,7 +913,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         title = str(product["title"] or "محصول")
         price = int(product["price"] or 0)
         if price <= 0:
-            await self.send(event["chat_id"], "قیمت این محصول معتبر نیست؛ با پشتیبانی تماس بگیر.")
+            await self.send(
+                event["chat_id"],
+                "قیمت این محصول معتبر نیست؛ با پشتیبانی تماس بگیر.\n"
+                f"آیدی پشتیبانی: {(await self.db.get_support_contact())['handle']}",
+            )
             return
         if kind == "gem":
             supplier_sku = str(product["supplier_sku"] or "").strip()
@@ -1784,13 +1788,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "SELECT id,title FROM departments WHERE active ORDER BY id"
         )
         header = "🎧 پشتیبانی Atomic\n━━━━━━━━━━━━━━━\n"
-        if support["handle"]:
-            header += (
-                f"آیدی پشتیبانی (پیام مستقیم):\n{support['handle']}\n\n"
-                "یا از طریق تیکت داخل ربات پیام بفرست.\n"
-            )
-        else:
-            header += "پیامت را از طریق تیکت داخل ربات بفرست.\n"
+        handle = support["handle"] or "@omid_1797"
+        header += (
+            f"آیدی پشتیبانی (پیام مستقیم):\n{handle}\n\n"
+            "یا از طریق تیکت داخل ربات پیام بفرست.\n"
+        )
         if not departments:
             await self.db.set_session(
                 event["sender_id"],
@@ -1830,9 +1832,13 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "برای کارت‌به‌کارت، خرید فقط بعد از تأیید مدیر انجام خواهد شد."
         )
         text = await self.db.setting("help_text", default)
+        support = await self.db.get_support_contact()
+        body = text or default
+        if support["handle"] and support["handle"] not in body:
+            body += f"\n\n🎧 آیدی پشتیبانی:\n{support['handle']}"
         await self.send(
             event["chat_id"],
-            text or default,
+            body,
         )
 
     async def handle_state(self, event, user, state, data):
@@ -4575,5 +4581,8 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                     f"مبلغ: {receipt['amount']:,} تومان"
                 )
         else:
-            msg = "❌ رسید رد شد؛ با پشتیبانی تماس بگیر."
+            msg = (
+                "❌ رسید رد شد؛ با پشتیبانی تماس بگیر.\n"
+                f"آیدی پشتیبانی: {(await self.db.get_support_contact())['handle']}"
+            )
         await self.api.send_message(user["chat_id"], msg)
