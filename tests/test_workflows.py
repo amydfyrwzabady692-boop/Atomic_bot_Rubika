@@ -507,6 +507,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("FOR UPDATE", connection.queries[0])
         self.assertIn("FOR UPDATE", connection.queries[1])
 
+    def test_finalize_gateway_allows_pending_status(self):
+        source = inspect.getsource(Database.finalize_gateway)
+        self.assertIn('payment["status"] not in {', source)
+        self.assertNotIn(
+            'payment["status"]\n                    in {"pending"',
+            source,
+        )
+        self.assertIn('"pending"', source)
+        self.assertIn('"expired"', source)
+
     def test_supplier_cost_math_uses_decimal_rounding(self):
         self.assertEqual(str(checked_decimal("0.935")), "0.935000")
         self.assertEqual(supplier_cost_toman("0.935", 100_001), 93_501)

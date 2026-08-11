@@ -631,11 +631,14 @@ class Database:
                     if payment["ref_id"] and str(payment["ref_id"]) != str(ref_id):
                         raise ValueError("شناسه مرجع با پرداخت تأییدشده مطابقت ندارد.")
                     return payment, False
-                if (
-                    payment["provider"] != "gateway"
-                    or payment["status"]
-                    in {"pending", "expired", "cancelled", "rejected"}
-                ):
+                # فقط پرداخت‌های درگاه که هنوز نهایی نشده‌اند قابل ثبت‌اند.
+                # (callback / بررسی دستی / reconcile همه همین وضعیت‌ها را می‌فرستند)
+                if payment["provider"] != "gateway" or payment["status"] not in {
+                    "pending",
+                    "expired",
+                    "cancelled",
+                    "rejected",
+                }:
                     raise ValueError("پرداخت نامعتبر است.")
                 order = None
                 order_status = None
