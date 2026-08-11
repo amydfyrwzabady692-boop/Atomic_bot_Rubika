@@ -171,14 +171,12 @@ class CredentialHandlers:
             return
         sku = str(product.get("supplier_sku") or "")
         plan = "هفتگی" if "weekly" in sku else "ماهانه"
-        base_try = 60 if "weekly" in sku else 300
         support = await self.db.get_credential_support_contact()
         text = (
             f"🔐 {product['title']}\n"
             "━━━━━━━━━━━━━━━\n"
             f"📅 دوره: {plan}\n"
-            f"🇹🇷 مبنای هزینه: iTunes Turkey {base_try} TRY\n"
-            f"💰 قیمت فروش: {int(product['price']):,} تومان\n"
+            f"💰 قیمت: {int(product['price']):,} تومان\n"
             "⏳ تحویل: دستی پس از بررسی اطلاعات توسط ادمین\n\n"
             "مراحل بعدی:\n"
             "۱) انتخاب روش ورود (Gmail / Facebook / VK)\n"
