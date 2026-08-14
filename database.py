@@ -4,7 +4,7 @@ from pathlib import Path
 
 import asyncpg
 
-from payment_safety import order_amounts
+from payment_safety import checked_amount, order_amounts
 
 
 class Database:
@@ -51,8 +51,13 @@ class Database:
             (display_name or "")[:200],
         )
 
+    @staticmethod
+    def is_owner(rubika_id: str, root_id: str) -> bool:
+        """فقط شناسهٔ تنظیم‌شده در RUBIKA_ADMIN_ID مالک پنل مدیریت است."""
+        return bool(root_id) and str(rubika_id) == str(root_id)
+
     async def is_admin(self, rubika_id: str, root_id: str) -> bool:
-        if rubika_id == root_id:
+        if self.is_owner(rubika_id, root_id):
             return True
         return bool(
             await self.pool.fetchval(
@@ -63,7 +68,7 @@ class Database:
         )
 
     async def is_credential_admin(self, rubika_id: str, root_id: str) -> bool:
-        if rubika_id == root_id:
+        if self.is_owner(rubika_id, root_id):
             return True
         return bool(
             await self.pool.fetchval(
@@ -178,7 +183,7 @@ class Database:
                 )
                 return old_index != new_index
 
-    async def create_order(self, user_id: int, product_id: int, player_id=""):
+    async def create_order(self, user_id: int, product_id: int, player_id="", quantity=1):
         async with self.pool.acquire() as conn:
             async with conn.transaction(isolation="serializable"):
                 await conn.fetchval(
@@ -269,12 +274,18 @@ class Database:
                            WHERE id=ANY($1::bigint[])""",
                         old_ids,
                     )
+                qty = int(quantity or 1)
+                if qty < 1 or qty > 50:
+                    raise ValueError("تعداد نامعتبر است.")
                 product = await conn.fetchrow(
-                    "SELECT * FROM products WHERE id=$1 AND active AND stock>0 FOR UPDATE",
+                    "SELECT * FROM products WHERE id=$1 AND active AND stock>=$2 FOR UPDATE",
                     product_id,
+                    qty,
                 )
                 if not product:
                     raise ValueError("محصول موجود نیست.")
+                unit_price = checked_amount(product["price"], label="قیمت محصول")
+                line_total = checked_amount(unit_price * qty, label="مبلغ کل")
                 discount = 0
                 pending_code = await conn.fetchrow(
                     """SELECT c.* FROM pending_discounts d
@@ -292,7 +303,7 @@ class Database:
                         )
                     ):
                         percent = min(99, int(pending_code["value"]))
-                        discount = int(product["price"]) * percent // 100
+                        discount = int(line_total) * percent // 100
                 order = await conn.fetchrow(
                     """INSERT INTO orders(
                          user_id,total_amount,discount_amount,payable_amount,
@@ -301,22 +312,24 @@ class Database:
                          $1,$2::bigint,$3::bigint,$2::bigint-$3::bigint,$4,$5,true
                        ) RETURNING *""",
                     user_id,
-                    product["price"],
+                    line_total,
                     discount,
                     player_id,
                     pending_code["code"] if pending_code and discount else "",
                 )
                 await conn.execute(
                     """INSERT INTO order_items(order_id,product_id,title,quantity,unit_price)
-                       VALUES($1,$2,$3,1,$4)""",
+                       VALUES($1,$2,$3,$4,$5)""",
                     order["id"],
                     product_id,
                     product["title"],
-                    product["price"],
+                    qty,
+                    unit_price,
                 )
                 changed = await conn.execute(
-                    """UPDATE products SET stock=stock-1
-                       WHERE id=$1 AND active AND stock>0""",
+                    """UPDATE products SET stock=stock-$1
+                       WHERE id=$2 AND active AND stock>=$1""",
+                    qty,
                     product_id,
                 )
                 if not changed.endswith("1"):
@@ -1196,8 +1209,11 @@ class Database:
         login_method: str,
         ciphertext: str,
         two_factor: bool = False,
+        quantity: int = 1,
     ):
-        order, product = await self.create_order(user_id, product_id, player_id="")
+        order, product = await self.create_order(
+            user_id, product_id, player_id="", quantity=quantity
+        )
         await self.pool.execute(
             """INSERT INTO credential_orders(
                  order_id,login_method,ciphertext,two_factor,cred_status
@@ -1226,6 +1242,7 @@ class Database:
             f"""SELECT o.id,o.status,o.total_amount,o.paid_at,o.created_at,
                       p.title,c.login_method,c.cred_status,c.two_factor,
                       u.rubika_id,u.display_name,u.chat_id,
+                      i.quantity,
                       CASE WHEN c.ciphertext='' OR c.deleted_at IS NOT NULL
                            THEN false ELSE true END AS has_secret
                FROM credential_orders c
@@ -1248,6 +1265,7 @@ class Database:
             """SELECT o.*,c.login_method,c.ciphertext,c.two_factor,c.cred_status,
                       c.viewed_at,c.deleted_at,c.admin_note,
                       p.title AS product_title,p.kind,
+                      i.quantity,i.unit_price,
                       u.rubika_id,u.display_name,u.chat_id,u.id AS user_db_id
                FROM credential_orders c
                JOIN orders o ON o.id=c.order_id

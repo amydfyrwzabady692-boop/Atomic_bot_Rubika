@@ -10,6 +10,7 @@ from credential_vault import (
     mask_identifier,
 )
 from keyboards import admin_menu, credential_staff_menu, inline, main_menu
+from payment_safety import checked_amount
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,19 @@ BACKUP_FOOTER = (
     "بعد پرداخت کن؛ پس از پرداخت موفق دسترسی به آیدی پشتیبان باز می‌شود."
 )
 
+CREDENTIAL_QTY_MAX = 50
+_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def parse_credential_quantity(raw) -> int:
+    text = str(raw or "").strip().translate(_DIGIT_MAP).replace(",", "").replace(" ", "")
+    if not text.isdigit():
+        raise ValueError("تعداد باید یک عدد صحیح باشد (مثلاً ۱ یا ۳).")
+    qty = int(text)
+    if qty < 1 or qty > CREDENTIAL_QTY_MAX:
+        raise ValueError(f"تعداد باید بین ۱ تا {CREDENTIAL_QTY_MAX} باشد.")
+    return qty
+
 
 class CredentialHandlers:
     """Mixin-style helpers; Router methods call these with self as router."""
@@ -139,8 +153,7 @@ class CredentialHandlers:
             "🔐 جم با اطلاعات اکانت\n"
             "━━━━━━━━━━━━━━━\n"
             "عضویت هفتگی یا ماهانه را انتخاب کن.\n"
-            "بعد از انتخاب: روش ورود ← شناسه ← رمز ← راهنمای بک‌آپ "
-            "(اگر بلد نیستی دکمه راهنمایی را بزن).\n\n"
+            "بعد از انتخاب بسته، تعداد را بفرست؛ سپس روش ورود ← شناسه ← رمز ← بک‌آپ.\n\n"
             "راهنمای گرفتن بک‌آپ برای Gmail / Facebook / VK داخل چت می‌آید.\n"
             "🔒 بعد از پرداخت، دسترسی به آیدی پشتیبان باز می‌شود."
         )
@@ -173,14 +186,15 @@ class CredentialHandlers:
             f"🔐 {product['title']}\n"
             "━━━━━━━━━━━━━━━\n"
             f"📅 دوره: {plan}\n"
-            f"💰 قیمت: {int(product['price']):,} تومان\n"
+            f"💰 قیمت هر عدد: {int(product['price']):,} تومان\n"
             "⏳ تحویل: دستی پس از بررسی اطلاعات توسط ادمین\n\n"
             "مراحل بعدی:\n"
-            "۱) انتخاب روش ورود (Gmail / Facebook / VK)\n"
-            "۲) شناسه ورود\n"
-            "۳) رمز عبور\n"
-            "۴) راهنمای بک‌آپ (اگر بلد نیستی: نیاز به راهنمایی)\n"
-            "۵) پرداخت\n\n"
+            "۱) وارد کردن تعداد\n"
+            "۲) انتخاب روش ورود (Gmail / Facebook / VK)\n"
+            "۳) شناسه ورود\n"
+            "۴) رمز عبور\n"
+            "۵) راهنمای بک‌آپ (اگر بلد نیستی: نیاز به راهنمایی)\n"
+            "۶) پرداخت جمع کل\n\n"
             "🔒 بعد از پرداخت، دسترسی به آیدی پشتیبان باز می‌شود."
         )
         await self.send(
@@ -208,30 +222,31 @@ class CredentialHandlers:
             return
         await self.db.set_session(
             event["sender_id"],
-            "cred_method",
+            "cred_qty",
             {
                 "product_id": int(product["id"]),
                 "title": product["title"],
+                "unit_price": int(product["price"]),
                 "price": int(product["price"]),
             },
         )
         await self.send(
             event["chat_id"],
-            "روش ورود اکانت فری‌فایر را انتخاب کن:",
-            buttons=inline(
-                [
-                    [("cred_method:google", "📧 Gmail / Google")],
-                    [("cred_method:facebook", "📘 Facebook")],
-                    [("cred_method:vk", "🟣 VK")],
-                    [("cred_cancel", "❌ انصراف")],
-                ]
-            ),
+            f"🔢 تعداد را وارد کن\n"
+            f"محصول: {product['title']}\n"
+            f"قیمت هر عدد: {int(product['price']):,} تومان\n\n"
+            f"یک عدد بین ۱ تا {CREDENTIAL_QTY_MAX} بفرست.\n"
+            "جمع کل بعد از وارد کردن تعداد مشخص می‌شود.",
+            buttons=inline([[("cred_cancel", "❌ انصراف")]]),
         )
 
     async def credential_method_selected(self, event, method: str):
         state, data = await self.db.session(event["sender_id"])
         if state != "cred_method" or method not in METHOD_META:
             await self.send(event["chat_id"], "جلسه منقضی شده؛ دوباره شروع کن.")
+            return
+        if not int(data.get("quantity") or 0):
+            await self.send(event["chat_id"], "❌ اول تعداد را وارد کن.")
             return
         data["method"] = method
         await self.db.set_session(event["sender_id"], "cred_identifier", data)
@@ -264,6 +279,36 @@ class CredentialHandlers:
 
     async def credential_handle_state(self, event, user, state, data):
         text = (event.get("text") or "").strip()
+        if state == "cred_qty":
+            try:
+                qty = parse_credential_quantity(text)
+                unit = int(data.get("unit_price") or data.get("price") or 0)
+                total = checked_amount(unit * qty, label="مبلغ کل")
+            except ValueError as exc:
+                await self.send(
+                    event["chat_id"],
+                    f"❌ {exc}",
+                    buttons=inline([[("cred_cancel", "❌ انصراف")]]),
+                )
+                return True
+            data["quantity"] = qty
+            data["price"] = total
+            await self.db.set_session(event["sender_id"], "cred_method", data)
+            await self.send(
+                event["chat_id"],
+                f"✅ تعداد: {qty} عدد\n"
+                f"جمع کل: {total:,} تومان\n\n"
+                "روش ورود اکانت فری‌فایر را انتخاب کن:",
+                buttons=inline(
+                    [
+                        [("cred_method:google", "📧 Gmail / Google")],
+                        [("cred_method:facebook", "📘 Facebook")],
+                        [("cred_method:vk", "🟣 VK")],
+                        [("cred_cancel", "❌ انصراف")],
+                    ]
+                ),
+            )
+            return True
         if state == "cred_identifier":
             method = data.get("method")
             if not method or method not in METHOD_META or not text or len(text) > 200:
@@ -336,15 +381,20 @@ class CredentialHandlers:
         method = METHOD_META.get(data.get("method"), {}).get("label", data.get("method"))
         has_backup = bool(str(data.get("backup_code") or "").strip())
         backup_line = "ثبت شد ✅" if has_backup else "نیاز به راهنمایی / ارسال نشده 🆘"
+        qty = int(data.get("quantity") or 1)
+        unit = int(data.get("unit_price") or 0)
+        unit_line = f"قیمت هر عدد: {unit:,} تومان\n" if unit else ""
         text = (
             "✅ بازبینی اطلاعات\n"
             "━━━━━━━━━━━━━━━\n"
             f"محصول: {data.get('title')}\n"
+            f"تعداد: {qty} عدد\n"
+            f"{unit_line}"
             f"روش ورود: {method}\n"
             f"شناسه: {mask_identifier(data.get('identifier'))}\n"
             f"رمز: ثبت شد ✅\n"
             f"کد بک‌آپ: {backup_line}\n"
-            f"مبلغ: {int(data.get('price') or 0):,} تومان\n\n"
+            f"جمع کل: {int(data.get('price') or 0):,} تومان\n\n"
             "با تأیید، سفارش ساخته می‌شود و صفحه پرداخت باز می‌شود.\n"
         )
         if not has_backup:
@@ -368,7 +418,12 @@ class CredentialHandlers:
             await self.db.set_session(event["sender_id"])
             return
         state, data = await self.db.session(event["sender_id"])
-        if state != "cred_confirm" or not data.get("password") or not data.get("identifier"):
+        if (
+            state != "cred_confirm"
+            or not data.get("password")
+            or not data.get("identifier")
+            or not int(data.get("quantity") or 0)
+        ):
             await self.send(event["chat_id"], "❌ اطلاعات ناقص است؛ دوباره شروع کن.")
             await self.db.set_session(event["sender_id"])
             return
@@ -384,6 +439,7 @@ class CredentialHandlers:
                 login_method=data["method"],
                 ciphertext=ciphertext,
                 two_factor=bool(data.get("backup_code")),
+                quantity=int(data.get("quantity") or 1),
             )
         except (ValueError, CredentialVaultError) as exc:
             await self.send(event["chat_id"], f"❌ {exc}", menu=main_menu())
@@ -401,6 +457,7 @@ class CredentialHandlers:
             f"✦ انتخاب روش پرداخت\n"
             f"سفارش #{order['id']}\n"
             f"محصول: {product['title']}\n"
+            f"تعداد: {int(data.get('quantity') or 1)} عدد\n"
             f"مبلغ: {int(order['payable_amount']):,} تومان\n"
             f"موجودی کیف پول: {balance:,} تومان\n\n"
             "اگر بک‌آپ بلد نبودی، بعد از پرداخت تیکت راهنمایی برایت باز می‌شود.",
@@ -432,9 +489,11 @@ class CredentialHandlers:
             "label", row["login_method"] or "—"
         )
         has_backup = bool(row.get("two_factor"))
+        qty = int(row.get("quantity") or 1)
         text = (
             f"💰 پرداخت شد — جم با اطلاعات #{order_id}\n"
             f"محصول: {row['product_title']}\n"
+            f"تعداد: {qty} عدد از این بسته\n"
             f"مبلغ: {int(row['total_amount']):,} تومان\n"
             f"روش ورود: {method}\n"
             f"کد بک‌آپ: {'ثبت شده ✅' if has_backup else 'ثبت نشده 🆘'}\n"
@@ -602,7 +661,8 @@ class CredentialHandlers:
         for row in rows:
             st = labels.get(row["cred_status"], row["cred_status"])
             lines.append(
-                f"#{row['id']} · {row['title']} · {int(row['total_amount']):,} ت · {st}"
+                f"#{row['id']} · {row['title']} · {int(row.get('quantity') or 1)} عدد · "
+                f"{int(row['total_amount']):,} ت · {st}"
             )
             buttons.append(
                 [(f"cred_admin_open:{row['id']}", f"{st} · #{row['id']}")]
@@ -625,6 +685,7 @@ class CredentialHandlers:
             f"🔐 سفارش #{order_id}\n"
             "━━━━━━━━━━━━━━━\n"
             f"محصول: {row['product_title']}\n"
+            f"تعداد: {int(row.get('quantity') or 1)} عدد از این بسته\n"
             f"مبلغ: {int(row['total_amount']):,} ت\n"
             f"وضعیت سفارش: {row['status']}\n"
             f"وضعیت اطلاعات: {row['cred_status']}\n"

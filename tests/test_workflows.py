@@ -411,9 +411,21 @@ class WorkflowTests(unittest.TestCase):
         router_source = (ROOT / "router.py").read_text(encoding="utf-8")
         self.assertIn("async def admin(self, event, action):", router_source)
         self.assertIn("دسترسی مدیر ندارید.", router_source)
+        self.assertIn("is_owner(event[\"sender_id\"], self.config.admin_id)", router_source)
         self.assertIn("admin_product_add_kind", router_source)
         self.assertIn("product_add_start(event)", router_source)
         self.assertIn("COALESCE(category,'bot')<>'credential'", router_source)
+
+    def test_management_panel_is_owner_only_not_delegated_admin(self):
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        router_source = (ROOT / "router.py").read_text(encoding="utf-8")
+        self.assertIn("def is_owner(rubika_id: str, root_id: str)", database_source)
+        self.assertIn(
+            "return main_menu(is_admin=is_owner, is_cred_staff=is_cred)",
+            router_source,
+        )
+        self.assertIn("if is_owner:", router_source)
+        self.assertIn('if action == "admin_panel":', router_source)
 
     def test_late_gateway_payment_credits_wallet_when_order_closed(self):
         database_source = (ROOT / "database.py").read_text(encoding="utf-8")

@@ -65,11 +65,12 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         return await self.api.send_message(chat_id, text, chat_keypad=menu, inline_keypad=buttons)
 
     async def user_menu(self, rubika_id: str):
-        is_admin = await self.db.is_admin(rubika_id, self.config.admin_id)
-        is_cred = (not is_admin) and await self.db.is_credential_admin(
+        # پنل مدیریت فقط برای مالک (RUBIKA_ADMIN_ID)، نه مدیران فرعی.
+        is_owner = self.db.is_owner(rubika_id, self.config.admin_id)
+        is_cred = (not is_owner) and await self.db.is_credential_admin(
             rubika_id, self.config.admin_id
         )
-        return main_menu(is_admin=is_admin, is_cred_staff=is_cred)
+        return main_menu(is_admin=is_owner, is_cred_staff=is_cred)
 
     async def handle(self, event: dict):
         if not event["chat_id"] or not event["sender_id"]:
@@ -162,10 +163,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "📦 سفارش‌های آماده": "cred_admin_list",
             "🎫 تیکت‌ها": "cred_admin_tickets",
         }
+        is_owner = self.db.is_owner(event["sender_id"], self.config.admin_id)
         is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
         is_cred_staff = await self.ensure_credential_staff(event["sender_id"])
         if not event["button_id"]:
-            if is_admin:
+            if is_owner:
                 action = _admin_label_map.get(action, action)
             elif is_cred_staff:
                 action = _cred_staff_label_map.get(action, action)
@@ -174,7 +176,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.start(event, user)
             return
         if action == "admin_panel":
-            if await self.db.is_admin(event["sender_id"], self.config.admin_id):
+            if is_owner:
                 await self.open_admin_panel(event)
             else:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
@@ -188,7 +190,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 await self.send(event["chat_id"], "عملیات فعالی برای لغو نیست.")
                 return
             await self.db.set_session(event["sender_id"])
-            if is_admin:
+            if is_owner:
                 menu = admin_menu()
             elif is_cred_staff:
                 menu = credential_staff_menu()
@@ -233,7 +235,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         } or action.startswith(
             ("admin_cred_set_", "admin_set_gem_id_profit")
         ):
-            if not is_admin:
+            if not is_owner:
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
                 return
             if action in {
@@ -272,7 +274,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             if await self.dispatch_credential_action(event, user, action):
                 return
         if action == "/admin" or action.startswith("admin_"):
-            if is_admin:
+            if is_owner:
                 if action == "/admin":
                     await self.open_admin_panel(event)
                 else:
@@ -315,7 +317,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
                 return
             await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
             return
-        if action.startswith("/") and is_admin:
+        if action.startswith("/") and is_owner:
             # دستورات اسلش فقط به‌عنوان سازگاری قدیمی؛ پنل کاملاً دکمه‌ای است.
             await self.admin_command(event, action)
             return
@@ -735,11 +737,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         text = await self.db.setting("welcome_text", WELCOME)
         if text.strip() == "✨ به اتومیک شاپ روبیکا خوش اومدی! ✨":
             text = WELCOME
-        is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
-        is_cred = (not is_admin) and await self.db.is_credential_admin(
+        is_owner = self.db.is_owner(event["sender_id"], self.config.admin_id)
+        is_cred = (not is_owner) and await self.db.is_credential_admin(
             event["sender_id"], self.config.admin_id
         )
-        if is_admin:
+        if is_owner:
             text += "\n\n🛠 برای مدیریت، از دکمه «پنل مدیریت» در منو استفاده کن."
         elif is_cred:
             text += "\n\n🔐 برای سفارش‌های جم با اطلاعات، دکمه «پنل جم با اطلاعات» را بزن."
@@ -1843,7 +1845,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
 
     async def handle_state(self, event, user, state, data):
         if state.startswith("admin_") and state != "admin_ticket_reply":
-            if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+            if not self.db.is_owner(event["sender_id"], self.config.admin_id):
                 await self.db.set_session(event["sender_id"])
                 await self.send(event["chat_id"], "⛔️ دسترسی مدیر ندارید.")
                 return
@@ -1851,6 +1853,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.credential_prompt_current_step(event, state, data)
             return
         if state in {
+            "cred_qty",
             "cred_identifier",
             "cred_password",
             "cred_backup",
@@ -2647,7 +2650,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
 
     async def admin(self, event, action):
         chat = event["chat_id"]
-        if not await self.db.is_admin(event["sender_id"], self.config.admin_id):
+        if not self.db.is_owner(event["sender_id"], self.config.admin_id):
             await self.send(chat, "⛔️ دسترسی مدیر ندارید.")
             return
         state, _ = await self.db.session(event["sender_id"])

@@ -308,6 +308,22 @@ class KeyboardTests(unittest.TestCase):
         self.assertIn("🛍 فروشگاه اکانت", labels)
         self.assertIn("📚 راهنما", labels)
         self.assertIn("🆔 شناسه من", labels)
+        self.assertNotIn("🛠 پنل مدیریت", labels)
+
+    def test_admin_panel_button_only_for_owner_flag(self):
+        labels = [
+            button["button_text"]
+            for row in main_menu(is_admin=True)["rows"]
+            for button in row["buttons"]
+        ]
+        self.assertIn("🛠 پنل مدیریت", labels)
+        staff_labels = [
+            button["button_text"]
+            for row in main_menu(is_cred_staff=True)["rows"]
+            for button in row["buttons"]
+        ]
+        self.assertIn("🔐 پنل جم با اطلاعات", staff_labels)
+        self.assertNotIn("🛠 پنل مدیریت", staff_labels)
 
     def test_link_button_uses_rubika_url_button_shape(self):
         value = link_button(
@@ -339,7 +355,8 @@ class KeyboardTests(unittest.TestCase):
         self.assertNotIn("وی‌پی‌ان", source)
         self.assertIn("مدیریت مدیران فقط در اختیار مالک اصلی", source)
         self.assertIn('action.startswith("admin_")', handle_source)
-        self.assertIn("if is_admin:", handle_source)
+        self.assertIn("if is_owner:", handle_source)
+        self.assertIn("is_owner(rubika_id, self.config.admin_id)", source)
         self.assertEqual(Router.pretty_card("6037 9912-3456 7893"), "6037991234567893")
         self.assertIn("send_card_transfer_messages", source)
         self.assertIn("format_credential_sync_report", source)
@@ -390,6 +407,33 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("g2bulk_catalogue_titles_fa_v2_20260727", schema)
         self.assertIn("g2bulk_package_titles_fa_v3_20260728", schema)
         self.assertIn("status='SUBMIT_UNKNOWN'", schema)
+
+
+class CredentialQuantityTests(unittest.TestCase):
+    def test_parses_persian_digits_and_rejects_out_of_range(self):
+        from credentials import parse_credential_quantity
+
+        self.assertEqual(parse_credential_quantity("۳"), 3)
+        self.assertEqual(parse_credential_quantity("12"), 12)
+        with self.assertRaises(ValueError):
+            parse_credential_quantity("0")
+        with self.assertRaises(ValueError):
+            parse_credential_quantity("abc")
+        with self.assertRaises(ValueError):
+            parse_credential_quantity("51")
+
+    def test_credential_flow_asks_quantity_and_admin_sees_count(self):
+        cred_source = (ROOT / "credentials.py").read_text(encoding="utf-8")
+        db_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        router_source = (ROOT / "router.py").read_text(encoding="utf-8")
+        self.assertIn('"cred_qty"', cred_source)
+        self.assertIn("parse_credential_quantity", cred_source)
+        self.assertIn("تعداد: {qty} عدد از این بسته", cred_source)
+        self.assertIn("quantity=quantity", db_source)
+        self.assertIn("unit_price * qty", db_source)
+        self.assertIn("i.quantity", db_source)
+        self.assertIn('"cred_qty"', router_source)
+        self.assertIn("stock=stock-$1", db_source)
 
 
 if __name__ == "__main__":
