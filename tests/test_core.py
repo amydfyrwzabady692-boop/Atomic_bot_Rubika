@@ -249,7 +249,6 @@ class DatabaseTests(unittest.TestCase):
         admin_source = inspect.getsource(Router.admin)
         state_source = inspect.getsource(Router.handle_state)
         labels_source = (ROOT / "button_labels.py").read_text(encoding="utf-8")
-        api_source = (ROOT / "rubika_api.py").read_text(encoding="utf-8")
         # Admin chat_keypad labels map to actions for clients that send text.
         self.assertIn('"👥 کاربران": "admin_users"', labels_source)
         self.assertIn('"💳 بخش مالی": "admin_finance"', labels_source)
@@ -260,7 +259,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("support_cancel", handle_source)
         self.assertIn("USER_BUTTON_LABELS", handle_source)
         self.assertIn("apply_button_label_map", handle_source)
-        self.assertIn("polling_chat_keypad", api_source)
+        self.assertIn("register_inline_webhook", (ROOT / "main.py").read_text(encoding="utf-8"))
         self.assertIn("pay_check:", handle_source)
         self.assertIn("order_pay:", handle_source)
         self.assertIn("_delivery_preflight", handle_source)
@@ -535,10 +534,11 @@ class RubikaClientTests(unittest.TestCase):
         with self.assertRaises(RubikaAPIError):
             asyncio.run(run())
 
-    def test_support_keeps_department_chat_keypad(self):
+    def test_support_keeps_glass_department_buttons(self):
         source = inspect.getsource(Router.ask_support)
-        self.assertIn("menu=keypad(dept_rows)", source)
-        self.assertIn("buttons=inline(dept_rows)", source)
+        self.assertIn("buttons=inline(", source)
+        self.assertNotIn("menu=keypad(", source)
+        self.assertIn("support_dept:", source)
 
     def test_menu_navigation_cancels_in_progress_flow(self):
         source = inspect.getsource(Router.handle)

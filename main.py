@@ -43,6 +43,15 @@ class Application:
         if self.config.mode == "polling":
             log.info("Starting Rubika long polling (RUBIKA_MODE=polling)")
             self.tasks.append(asyncio.create_task(self.polling_loop()))
+            # Glass/inline taps are not included in getUpdates; they only arrive
+            # through ReceiveInlineMessage. Register that webhook even in polling
+            # so product/pay/support buttons stay glass, like before.
+            try:
+                await self.register_inline_webhook()
+            except Exception:
+                log.exception(
+                    "Inline webhook registration failed; glass buttons will not work"
+                )
         else:
             base, secret = self.config.callback_base, self.config.webhook_secret
             await self.api.update_endpoint(f"{base}/rubika/update/{secret}", "ReceiveUpdate")
@@ -56,6 +65,16 @@ class Application:
         )
         # بروزرسانی فوری قیمت جم در اولین استارت، تا قیمت‌ها همیشه لحظه‌ای باشند
         self.tasks.append(asyncio.create_task(self.run_initial_price_sync()))
+
+    async def register_inline_webhook(self):
+        base, secret = self.config.callback_base, self.config.webhook_secret
+        url = f"{base}/rubika/inline/{secret}"
+        result = await self.api.update_endpoint(url, "ReceiveInlineMessage")
+        log.info(
+            "Inline glass-button webhook registered at %s/rubika/inline/*** %s",
+            base,
+            result,
+        )
 
     async def close(self):
         for task in self.tasks:
@@ -940,6 +959,8 @@ async def webhook(request):
         payload = await request.json()
     except (TypeError, ValueError):
         raise web.HTTPBadRequest() from None
+    keys = list(payload.keys())[:12] if isinstance(payload, dict) else type(payload).__name__
+    log.info("Rubika webhook %s keys=%s", request.path, keys)
     asyncio.create_task(app_core.process_payload_ordered(payload))
     return web.json_response({"status": "ok"})
 

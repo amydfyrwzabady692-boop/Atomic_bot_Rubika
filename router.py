@@ -17,7 +17,6 @@ from keyboards import (
     admin_menu,
     credential_staff_menu,
     inline,
-    keypad,
     link_button,
     main_menu,
 )
@@ -1783,21 +1782,19 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.send(
                 event["chat_id"],
                 header + "\n" + (prompt or "پیام خودت را برای پشتیبانی بنویس:"),
-                menu=await self.user_menu(event["sender_id"]),
                 buttons=inline([[("support_cancel", "✖️ انصراف")]]),
             )
             return
-        dept_rows = [
-            [(f"support_dept:{row['id']}", row["title"])]
-            for row in departments
-        ]
-        dept_rows.append([("home", "🏠 بازگشت"), ("support_cancel", "✖️ انصراف")])
-        names = "\n".join(f"• {row['title']}" for row in departments)
         await self.send(
             event["chat_id"],
-            header + "\nدپارتمان پشتیبانی را انتخاب کن:\n" + names,
-            menu=keypad(dept_rows),
-            buttons=inline(dept_rows),
+            header + "\nدپارتمان پشتیبانی را انتخاب کن:",
+            buttons=inline(
+                [
+                    [(f"support_dept:{row['id']}", row["title"])]
+                    for row in departments
+                ]
+                + [[("home", "🏠 بازگشت")]]
+            ),
         )
 
     async def ask_promo(self, event):

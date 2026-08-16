@@ -14,11 +14,7 @@ from button_labels import (
 from keyboards import (
     admin_menu,
     credential_staff_menu,
-    inline,
-    inline_as_chat_keypad,
-    link_button,
     main_menu,
-    polling_chat_keypad,
 )
 
 
@@ -26,62 +22,6 @@ def _keypad_buttons(keypad):
     for row in keypad["rows"]:
         for item in row["buttons"]:
             yield item["id"], item["button_text"]
-
-
-class ChatKeypadMirrorTests(unittest.TestCase):
-    def test_copies_simple_buttons_for_polling(self):
-        glass = inline(
-            [
-                [("gems_by_id", "🆔 جم با آیدی · تحویل لحظه‌ای")],
-                [("home", "🔙 منوی اصلی")],
-            ]
-        )
-        bottom = inline_as_chat_keypad(glass)
-        self.assertEqual(bottom["rows"][0]["buttons"][0]["id"], "gems_by_id")
-        self.assertTrue(bottom["resize_keyboard"])
-        self.assertFalse(bottom["one_time_keyboard"])
-
-    def test_skips_link_buttons(self):
-        glass = inline(
-            [
-                [link_button("unused", "باز کردن درگاه", "https://example.com/pay")],
-                [("pay_change:7", "تغییر روش")],
-            ]
-        )
-        bottom = inline_as_chat_keypad(glass)
-        self.assertEqual(len(bottom["rows"]), 1)
-        self.assertEqual(bottom["rows"][0]["buttons"][0]["id"], "pay_change:7")
-
-    def test_empty_or_link_only_returns_none(self):
-        self.assertIsNone(inline_as_chat_keypad(None))
-        self.assertIsNone(
-            inline_as_chat_keypad(
-                inline([[link_button("x", "لینک", "https://example.com")]])
-            )
-        )
-
-    def test_polling_prefers_inline_over_main_menu(self):
-        glass = inline(
-            [
-                [("gems_by_id", "🆔 جم با آیدی · تحویل لحظه‌ای")],
-                [("gems_credentials", "🔐 جم با اطلاعات · هفتگی / ماهانه")],
-                [("home", "🔙 منوی اصلی")],
-            ]
-        )
-        bottom = polling_chat_keypad(glass, main_menu())
-        ids = [item["id"] for row in bottom["rows"] for item in row["buttons"]]
-        self.assertEqual(ids, ["gems_by_id", "gems_credentials", "home"])
-
-    def test_polling_appends_home_when_actions_have_no_back(self):
-        glass = inline([[("pay:gateway:7", "🌐 درگاه زرین‌پال")]])
-        bottom = polling_chat_keypad(glass, None)
-        ids = [item["id"] for row in bottom["rows"] for item in row["buttons"]]
-        self.assertEqual(ids[-1], "home")
-        self.assertIn("pay:gateway:7", ids)
-
-    def test_polling_keeps_plain_menu_when_no_inline(self):
-        menu = main_menu()
-        self.assertIs(polling_chat_keypad(None, menu), menu)
 
 
 class StaticMenuCoverageTests(unittest.TestCase):
