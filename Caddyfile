@@ -1,0 +1,20 @@
+{
+	admin off
+	auto_https disable_redirects
+	http_port 9080
+	https_port 443
+}
+
+rubika.atomicshop.ir {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	encode gzip
+	reverse_proxy bot:8081 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+	}
+}

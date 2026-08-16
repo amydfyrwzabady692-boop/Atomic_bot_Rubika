@@ -54,9 +54,30 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
+  # فقط 443 — پورت 80 مال nginx فری‌فایر روم است و نباید گرفته شود.
+  proxy:
+    image: caddy:2
+    container_name: atomic_rubika_proxy
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - atomic_rubika_caddy_data:/data
+      - atomic_rubika_caddy_config:/config
+    depends_on:
+      bot: {condition: service_healthy}
+    networks: [rubika_net]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
 networks:
   rubika_net:
 
 volumes:
   atomic_rubika_pgdata:
+  atomic_rubika_caddy_data:
+  atomic_rubika_caddy_config:
 

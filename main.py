@@ -46,12 +46,7 @@ class Application:
             # Glass/inline taps are not included in getUpdates; they only arrive
             # through ReceiveInlineMessage. Register that webhook even in polling
             # so product/pay/support buttons stay glass, like before.
-            try:
-                await self.register_inline_webhook()
-            except Exception:
-                log.exception(
-                    "Inline webhook registration failed; glass buttons will not work"
-                )
+            self.tasks.append(asyncio.create_task(self._register_inline_webhook_safe()))
         else:
             base, secret = self.config.callback_base, self.config.webhook_secret
             await self.api.update_endpoint(f"{base}/rubika/update/{secret}", "ReceiveUpdate")
@@ -66,15 +61,39 @@ class Application:
         # بروزرسانی فوری قیمت جم در اولین استارت، تا قیمت‌ها همیشه لحظه‌ای باشند
         self.tasks.append(asyncio.create_task(self.run_initial_price_sync()))
 
+    async def _register_inline_webhook_safe(self):
+        try:
+            await self.register_inline_webhook()
+        except Exception:
+            log.exception(
+                "Inline webhook registration failed; glass buttons will not work"
+            )
+
     async def register_inline_webhook(self):
         base, secret = self.config.callback_base, self.config.webhook_secret
         url = f"{base}/rubika/inline/{secret}"
-        result = await self.api.update_endpoint(url, "ReceiveInlineMessage")
-        log.info(
-            "Inline glass-button webhook registered at %s/rubika/inline/*** %s",
-            base,
-            result,
-        )
+        delay = 8
+        last_error = None
+        for attempt in range(1, 13):
+            try:
+                result = await self.api.update_endpoint(url, "ReceiveInlineMessage")
+                log.info(
+                    "Inline glass-button webhook registered at %s/rubika/inline/*** attempt=%s %s",
+                    base,
+                    attempt,
+                    result,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                log.warning(
+                    "Inline webhook registration attempt %s/12 failed: %s",
+                    attempt,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay + 5, 40)
+        raise RuntimeError("inline webhook registration failed") from last_error
 
     async def close(self):
         for task in self.tasks:
