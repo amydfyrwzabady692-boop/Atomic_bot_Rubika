@@ -5,6 +5,8 @@ from typing import Any
 
 import aiohttp
 
+from keyboards import polling_chat_keypad
+
 log = logging.getLogger(__name__)
 
 
@@ -82,6 +84,7 @@ class RubikaAPI:
         inline_keypad: dict | None = None,
         reply_to_message_id: str | None = None,
     ) -> dict:
+        chat_keypad = polling_chat_keypad(inline_keypad, chat_keypad)
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text[:4000]}
         if chat_keypad:
             payload.update(chat_keypad=chat_keypad, chat_keypad_type="New")

@@ -5,13 +5,18 @@ import re
 import asyncpg
 
 from admin_flows import AdminFlowHandlers
+from button_labels import (
+    ADMIN_BUTTON_LABELS,
+    CRED_STAFF_BUTTON_LABELS,
+    USER_BUTTON_LABELS,
+    apply_button_label_map,
+)
 from credentials import CredentialHandlers
 from database import Database
 from keyboards import (
     admin_menu,
     credential_staff_menu,
     inline,
-    inline_as_chat_keypad,
     keypad,
     link_button,
     main_menu,
@@ -70,8 +75,6 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         self.g2 = G2Bulk()
 
     async def send(self, chat_id, text, *, menu=None, buttons=None):
-        if menu is None and buttons:
-            menu = inline_as_chat_keypad(buttons)
         return await self.api.send_message(
             chat_id, text, chat_keypad=menu, inline_keypad=buttons
         )
@@ -101,102 +104,29 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.send(event["chat_id"], "🚫 حساب شما مسدود است.")
             return
         action = (event["button_id"] or event["text"] or "").strip()
-        _user_label_map = {
-            "🎮 محصولات فری‌فایر": "gems",
-            "💎 خرید جم": "gems",
-            "💎 جم فری‌فایر": "gems",
-            "💰 کیف پول": "wallet",
-            "📦 سفارش‌های من": "orders",
-            "👤 حساب من": "account",
-            "🛍 فروشگاه": "store",
-            "🛍 فروشگاه اکانت": "store",
-            "🎯 پک سنسیویتی": "sense",
-            "🎯 پک سنس": "sense",
-            "🎁 ثبت کد": "promo",
-            "🎧 پشتیبانی": "support",
-            "🧑‍💻 پشتیبانی": "support",
-            "📚 راهنما": "help",
-            "🆔 شناسه من": "myid",
-            "🆔 جم با آیدی · تحویل لحظه‌ای": "gems_by_id",
-            "🆔 جم با آیدی": "gems_by_id",
-            "جم با آیدی": "gems_by_id",
-            "جم با ایدی": "gems_by_id",
-            "🔐 جم با اطلاعات · هفتگی / ماهانه": "gems_credentials",
-            "🔐 جم با اطلاعات": "gems_credentials",
-            "🏠 بازگشت": "home",
-            "🔙 منوی اصلی": "home",
-            "🔙 روش‌های خرید": "gems",
-            "🔙 پک سنس": "sense",
-            "🔙 بازگشت به دسته‌ها": "store",
-            "🔙 بازگشت به کیف پول": "wallet",
-            "✅ بررسی عضویت": "join_request",
-            "📱 موبایل": "sense_mobile",
-            "🖥 PC": "sense_pc",
-            "✏️ مبلغ دلخواه": "wallet_charge",
-        }
-
-        def _apply_label_map(mapping: dict, current: str) -> str:
-            for candidate in (
-                (event["button_id"] or "").strip(),
-                (event["text"] or "").strip(),
-                current,
-            ):
-                mapped = mapping.get(candidate)
-                if mapped:
-                    return mapped
-            return current
-
-        action = _apply_label_map(_user_label_map, action)
-        # برخی کلاینت‌های روبیکا برای دکمه‌های chat_keypad فقط متن دکمه را
-        # می‌فرستند نه button_id را؛ متن دکمه‌های منوی ادمین را به action درست تبدیل کن.
-        _admin_label_map = {
-            "📊 آمار کلی": "admin_stats",
-            "💵 نرخ و سود": "admin_fx",
-            "💵 نرخ دلار": "admin_fx",
-            "📦 مدیریت محصولات": "admin_products",
-            "🗂 دسته‌بندی": "admin_categories",
-            "🗂 دسته‌بندی‌ها": "admin_categories",
-            "💳 بخش مالی": "admin_finance",
-            "💳 امور مالی": "admin_finance",
-            "🧾 رسیدها": "admin_receipts",
-            "👥 کاربران": "admin_users",
-            "💰 شارژ کاربر": "admin_charge",
-            "🔎 جستجو": "admin_search",
-            "🎧 تیکت‌های پشتیبانی": "admin_support",
-            "📣 ارسال پیام": "admin_broadcast",
-            "📣 پیام همگانی": "admin_broadcast",
-            "🎁 کدها": "admin_codes",
-            "⚙️ تنظیمات": "admin_settings",
-            "👮 مدیریت مدیران": "admin_admins",
-            "🚨 مرکز عملیات": "admin_ops",
-            "🛍 مدیریت فروشگاه": "admin_shop",
-            "📦 سفارش‌ها": "admin_orders",
-            "🔄 بروزرسانی قیمت جم": "admin_pricing_sync",
-            "🔄 بروزرسانی قیمت": "admin_pricing_sync",
-            "🔄 همگام‌سازی قیمت‌ها": "admin_pricing_sync",
-            "🔄 sync جم با اطلاعات": "admin_pricing_sync",
-            "📈 درصد سود": "admin_pricing_home",
-            "📈 درصد سود جم": "admin_set_gem_id_profit",
-            "📅 سود هفتگی": "admin_cred_set_weekly_profit",
-            "📆 سود ماهانه": "admin_cred_set_monthly_profit",
-            "💱 قیمت‌گذاری جم با اطلاعات": "admin_pricing_home",
-            "💱 قیمت‌گذاری هفتگی/ماهانه": "admin_pricing_home",
-            "📈 قیمت و سود": "admin_pricing_home",
-            "🔐 جم با اطلاعات": "cred_admin_home",
-            "🛠 پنل مدیریت": "admin_panel",
-        }
-        _cred_staff_label_map = {
-            "🔐 پنل جم با اطلاعات": "cred_admin_home",
-            "📦 سفارش‌های آماده": "cred_admin_list",
-            "🎫 تیکت‌ها": "cred_admin_tickets",
-        }
+        action = apply_button_label_map(
+            USER_BUTTON_LABELS,
+            event["button_id"],
+            event["text"],
+            action,
+        )
         is_owner = self.db.is_owner(event["sender_id"], self.config.admin_id)
         is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
         is_cred_staff = await self.ensure_credential_staff(event["sender_id"])
         if is_owner:
-            action = _apply_label_map(_admin_label_map, action)
+            action = apply_button_label_map(
+                ADMIN_BUTTON_LABELS,
+                event["button_id"],
+                event["text"],
+                action,
+            )
         elif is_cred_staff:
-            action = _apply_label_map(_cred_staff_label_map, action)
+            action = apply_button_label_map(
+                CRED_STAFF_BUTTON_LABELS,
+                event["button_id"],
+                event["text"],
+                action,
+            )
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
             await self.db.set_session(event["sender_id"])
             await self.start(event, user)

@@ -108,3 +108,54 @@ def inline_as_chat_keypad(inline_keypad: dict | None) -> dict | None:
         "resize_keyboard": True,
         "one_time_keyboard": False,
     }
+
+
+_NAV_BUTTON_IDS = {
+    "home",
+    "gems",
+    "wallet",
+    "store",
+    "sense",
+    "orders",
+    "account",
+    "support",
+    "admin_panel",
+    "cred_admin_home",
+    "admin_ops",
+    "admin_support",
+    "admin_pricing_home",
+    "admin_shop",
+}
+
+
+def polling_chat_keypad(
+    inline_keypad: dict | None = None,
+    chat_keypad: dict | None = None,
+) -> dict | None:
+    """Prefer tappable bottom buttons; keep a way back to the main menu."""
+    mirrored = inline_as_chat_keypad(inline_keypad)
+    if not mirrored:
+        return chat_keypad
+    ids = {
+        str(item.get("id") or "")
+        for row in mirrored["rows"]
+        for item in row.get("buttons") or []
+    }
+    if ids & _NAV_BUTTON_IDS:
+        return mirrored
+    extra = {"buttons": [button("home", "🏠 منوی کاربر")]}
+    if isinstance(chat_keypad, dict):
+        for row in reversed(chat_keypad.get("rows") or []):
+            row_ids = {
+                str(item.get("id") or "") for item in row.get("buttons") or []
+            }
+            if row_ids & _NAV_BUTTON_IDS:
+                extra = row
+                break
+    extra_ids = {str(item.get("id") or "") for item in extra.get("buttons") or []}
+    if extra_ids - ids:
+        mirrored = {
+            **mirrored,
+            "rows": [*mirrored["rows"], extra],
+        }
+    return mirrored
