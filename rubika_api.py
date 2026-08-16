@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -11,18 +12,25 @@ class RubikaAPIError(RuntimeError):
     pass
 
 
+def _response_snippet(raw: str) -> str:
+    return " ".join(raw.split())[:300]
+
+
 class RubikaAPI:
     def __init__(self, token: str):
         self.base = f"https://botapi.rubika.ir/v3/{token}"
         self.session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
+        if self.session and not self.session.closed:
+            await self.session.close()
         timeout = aiohttp.ClientTimeout(total=25)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
     async def close(self) -> None:
         if self.session:
             await self.session.close()
+            self.session = None
 
     async def call(self, method: str, payload: dict | None = None) -> dict:
         if not self.session:
@@ -33,16 +41,34 @@ class RubikaAPI:
                 async with self.session.post(
                     f"{self.base}/{method}", json=payload or {}
                 ) as response:
-                    data = await response.json(content_type=None)
-                    if response.status >= 500:
-                        raise RubikaAPIError(f"Rubika HTTP {response.status}")
-                    if response.status >= 400 or not isinstance(data, dict):
+                    raw = await response.text()
+                    status = response.status
+                    if not raw.strip():
+                        raise RubikaAPIError(
+                            f"Rubika empty body for {method} HTTP {status}"
+                        )
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        raise RubikaAPIError(
+                            f"Rubika non-JSON {method} HTTP {status}: "
+                            f"{_response_snippet(raw)}"
+                        ) from exc
+                    if status >= 500:
+                        raise RubikaAPIError(f"Rubika HTTP {status}: {data}")
+                    if status >= 400 or not isinstance(data, dict):
                         raise RubikaAPIError(f"Rubika rejected {method}: {data}")
                     if str(data.get("status", "")).lower() in {"error", "failed"}:
                         raise RubikaAPIError(f"Rubika rejected {method}: {data}")
                     return data
             except (aiohttp.ClientError, asyncio.TimeoutError, RubikaAPIError) as exc:
                 last_error = exc
+                log.warning(
+                    "Rubika %s attempt %s failed: %s",
+                    method,
+                    attempt + 1,
+                    exc,
+                )
                 if attempt < 2:
                     await asyncio.sleep(0.5 * (2**attempt))
         raise RubikaAPIError(str(last_error))
@@ -63,7 +89,29 @@ class RubikaAPI:
             payload["inline_keypad"] = inline_keypad
         if reply_to_message_id:
             payload["reply_to_message_id"] = reply_to_message_id
-        return await self.call("sendMessage", payload)
+        try:
+            return await self.call("sendMessage", payload)
+        except RubikaAPIError:
+            if not inline_keypad and not chat_keypad:
+                raise
+            fallback: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": text[:4000],
+            }
+            if reply_to_message_id:
+                fallback["reply_to_message_id"] = reply_to_message_id
+            if inline_keypad and chat_keypad:
+                log.warning("sendMessage keypad failed; retrying without inline keypad")
+                fallback.update(chat_keypad=chat_keypad, chat_keypad_type="New")
+                try:
+                    return await self.call("sendMessage", fallback)
+                except RubikaAPIError:
+                    log.warning("sendMessage chat keypad failed; retrying text-only")
+                    fallback.pop("chat_keypad", None)
+                    fallback.pop("chat_keypad_type", None)
+                    return await self.call("sendMessage", fallback)
+            log.warning("sendMessage keypad failed; retrying text-only")
+            return await self.call("sendMessage", fallback)
 
     async def get_updates(self, offset_id: str | None = None) -> dict:
         payload: dict[str, Any] = {"limit": 100}

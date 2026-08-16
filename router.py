@@ -7,7 +7,14 @@ import asyncpg
 from admin_flows import AdminFlowHandlers
 from credentials import CredentialHandlers
 from database import Database
-from keyboards import admin_menu, credential_staff_menu, inline, link_button, main_menu
+from keyboards import (
+    admin_menu,
+    credential_staff_menu,
+    inline,
+    keypad,
+    link_button,
+    main_menu,
+)
 from payment_safety import (
     MIN_WALLET_CHARGE,
     checked_amount,
@@ -1808,19 +1815,21 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             await self.send(
                 event["chat_id"],
                 header + "\n" + (prompt or "پیام خودت را برای پشتیبانی بنویس:"),
+                menu=await self.user_menu(event["sender_id"]),
                 buttons=inline([[("support_cancel", "✖️ انصراف")]]),
             )
             return
+        dept_rows = [
+            [(f"support_dept:{row['id']}", row["title"])]
+            for row in departments
+        ]
+        dept_rows.append([("home", "🏠 بازگشت"), ("support_cancel", "✖️ انصراف")])
+        names = "\n".join(f"• {row['title']}" for row in departments)
         await self.send(
             event["chat_id"],
-            header + "\nدپارتمان پشتیبانی را انتخاب کن:",
-            buttons=inline(
-                [
-                    [(f"support_dept:{row['id']}", row["title"])]
-                    for row in departments
-                ]
-                + [[("home", "🏠 بازگشت")]]
-            ),
+            header + "\nدپارتمان پشتیبانی را انتخاب کن:\n" + names,
+            menu=keypad(dept_rows),
+            buttons=inline(dept_rows),
         )
 
     async def ask_promo(self, event):

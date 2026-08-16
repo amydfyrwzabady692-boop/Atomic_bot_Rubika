@@ -13,7 +13,7 @@ from keyboards import admin_menu, link_button, main_menu
 from payment_safety import checked_amount, order_amounts, valid_card_number
 from payments import Zarinpal
 from router import Router
-from rubika_api import normalize_event
+from rubika_api import RubikaAPI, RubikaAPIError, normalize_event
 from supplier import G2Bulk, compute_gem_sale_price, g2_idempotency_key
 
 
@@ -434,6 +434,94 @@ class CredentialQuantityTests(unittest.TestCase):
         self.assertIn("i.quantity", db_source)
         self.assertIn('"cred_qty"', router_source)
         self.assertIn("stock=stock-$1", db_source)
+
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    async def text(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class RubikaClientTests(unittest.TestCase):
+    def test_call_retries_empty_body_then_parses_json(self):
+        class Session:
+            def __init__(self):
+                self.bodies = ["", '{"status":"OK","data":{"bot":{}}}']
+                self.calls = 0
+
+            def post(self, _url, json=None):
+                self.calls += 1
+                return _FakeResponse(200, self.bodies.pop(0))
+
+        api = RubikaAPI("token")
+        api.session = Session()
+
+        async def run():
+            with patch("rubika_api.asyncio.sleep", AsyncMock()):
+                return await api.call("getMe")
+
+        data = asyncio.run(run())
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(api.session.calls, 2)
+
+    def test_send_message_retries_without_inline_keypad(self):
+        class Session:
+            def __init__(self):
+                self.payloads = []
+
+            def post(self, _url, json=None):
+                self.payloads.append(json)
+                if json and json.get("inline_keypad"):
+                    return _FakeResponse(200, "")
+                return _FakeResponse(200, '{"status":"OK","data":{"message_id":"m1"}}')
+
+        api = RubikaAPI("token")
+        api.session = Session()
+
+        async def run():
+            with patch("rubika_api.asyncio.sleep", AsyncMock()):
+                return await api.send_message(
+                    "chat",
+                    "hello",
+                    chat_keypad={"rows": []},
+                    inline_keypad={"rows": [{"buttons": []}]},
+                )
+
+        data = asyncio.run(run())
+        self.assertEqual(data["data"]["message_id"], "m1")
+        self.assertTrue(any("inline_keypad" in (p or {}) for p in api.session.payloads))
+        last = api.session.payloads[-1]
+        self.assertNotIn("inline_keypad", last)
+        self.assertIn("chat_keypad", last)
+
+    def test_call_raises_after_non_json_body(self):
+        class Session:
+            def post(self, _url, json=None):
+                return _FakeResponse(502, "<html>bad gateway</html>")
+
+        api = RubikaAPI("token")
+        api.session = Session()
+
+        async def run():
+            with patch("rubika_api.asyncio.sleep", AsyncMock()):
+                await api.call("sendMessage", {"chat_id": "c", "text": "hi"})
+
+        with self.assertRaises(RubikaAPIError):
+            asyncio.run(run())
+
+    def test_support_keeps_department_chat_keypad(self):
+        source = inspect.getsource(Router.ask_support)
+        self.assertIn("menu=keypad(dept_rows)", source)
+        self.assertIn("buttons=inline(dept_rows)", source)
 
 
 if __name__ == "__main__":

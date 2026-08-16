@@ -41,6 +41,7 @@ class Application:
         me = await self.api.get_me()
         log.info("Rubika API connected: %s", me)
         if self.config.mode == "polling":
+            log.info("Starting Rubika long polling (RUBIKA_MODE=polling)")
             self.tasks.append(asyncio.create_task(self.polling_loop()))
         else:
             base, secret = self.config.callback_base, self.config.webhook_secret
@@ -145,6 +146,7 @@ class Application:
                 data = response.get("data") if isinstance(response.get("data"), dict) else response
                 updates = data.get("updates") or []
                 if updates:
+                    log.info("Polling received %s update(s)", len(updates))
                     await asyncio.gather(
                         *(self.process_payload_ordered(update) for update in updates)
                     )
