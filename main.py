@@ -126,6 +126,18 @@ class Application:
                     "display_name": display_name,
                 }
         if not event:
+            kind = None
+            keys = []
+            if isinstance(payload, dict):
+                keys = list(payload.keys())[:12]
+                nested = (
+                    payload.get("update")
+                    if isinstance(payload.get("update"), dict)
+                    else payload
+                )
+                if isinstance(nested, dict):
+                    kind = nested.get("type")
+            log.info("Ignoring Rubika payload type=%s keys=%s", kind, keys)
             return
         try:
             await self.router.handle(event)
@@ -144,11 +156,19 @@ class Application:
             try:
                 response = await self.api.get_updates(offset)
                 data = response.get("data") if isinstance(response.get("data"), dict) else response
-                updates = data.get("updates") or []
-                if updates:
-                    log.info("Polling received %s update(s)", len(updates))
+                payloads: list = []
+                if isinstance(data, dict):
+                    for key in ("updates", "inline_messages", "inline_updates"):
+                        value = data.get(key)
+                        if isinstance(value, list):
+                            payloads.extend(value)
+                    inline_one = data.get("inline_message")
+                    if isinstance(inline_one, dict):
+                        payloads.append({"inline_message": inline_one})
+                if payloads:
+                    log.info("Polling received %s update(s)", len(payloads))
                     await asyncio.gather(
-                        *(self.process_payload_ordered(update) for update in updates)
+                        *(self.process_payload_ordered(item) for item in payloads)
                     )
                 offset = data.get("next_offset_id") or offset
                 await asyncio.sleep(1.5)

@@ -50,6 +50,19 @@ class EventTests(unittest.TestCase):
         )
         self.assertEqual(event["button_id"], "pay:gateway:7")
 
+    def test_normalizes_top_level_inline_type(self):
+        event = normalize_event(
+            {
+                "type": "InlineMessage",
+                "chat_id": "chat",
+                "sender_id": "u1",
+                "message_id": "m3",
+                "aux_data": {"button_id": "gems_by_id"},
+            }
+        )
+        self.assertEqual(event["button_id"], "gems_by_id")
+        self.assertTrue(event["event_id"].startswith("inline:"))
+
     def test_ignores_non_message_updates(self):
         self.assertIsNone(normalize_event({"update": {"type": "RemovedMessage"}}))
 
@@ -244,6 +257,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("flow_cancel", handle_source)
         self.assertIn("support_cancel", handle_source)
         self.assertIn("_user_label_map", handle_source)
+        self.assertIn("_apply_label_map", handle_source)
+        self.assertIn("inline_as_chat_keypad", inspect.getsource(Router.send))
         self.assertIn("pay_check:", handle_source)
         self.assertIn("order_pay:", handle_source)
         self.assertIn("_delivery_preflight", handle_source)
@@ -522,6 +537,12 @@ class RubikaClientTests(unittest.TestCase):
         source = inspect.getsource(Router.ask_support)
         self.assertIn("menu=keypad(dept_rows)", source)
         self.assertIn("buttons=inline(dept_rows)", source)
+
+    def test_menu_navigation_cancels_in_progress_flow(self):
+        source = inspect.getsource(Router.handle)
+        reset = source.split("_menu_reset_actions")[1]
+        self.assertIn('"gems_by_id"', reset)
+        self.assertIn('"wallet"', reset)
 
 
 if __name__ == "__main__":

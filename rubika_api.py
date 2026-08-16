@@ -157,18 +157,12 @@ def normalize_event(payload: dict) -> dict | None:
     """Normalize official receiveUpdate and receiveInlineMessage payloads."""
     if not isinstance(payload, dict):
         return None
-    if isinstance(payload.get("inline_message"), dict):
-        msg = payload["inline_message"]
-        aux = msg.get("aux_data") or {}
-        return {
-            "event_id": f"inline:{msg.get('chat_id')}:{msg.get('message_id')}:{aux.get('button_id')}",
-            "chat_id": str(msg.get("chat_id") or ""),
-            "sender_id": str(msg.get("sender_id") or ""),
-            "message_id": str(msg.get("message_id") or ""),
-            "text": str(msg.get("text") or ""),
-            "button_id": str(aux.get("button_id") or ""),
-            "file": msg.get("file"),
-        }
+    inline_msg = payload.get("inline_message")
+    payload_type = str(payload.get("type") or "").lower().replace("_", "")
+    if isinstance(inline_msg, dict):
+        return _normalize_inline(inline_msg)
+    if payload_type in {"inlinemessage", "newinlinemessage", "receiveinlinemessage"}:
+        return _normalize_inline(payload)
     update = payload.get("update") if isinstance(payload.get("update"), dict) else payload
     msg = update.get("new_message") if isinstance(update, dict) else None
     if not isinstance(msg, dict):
@@ -181,6 +175,19 @@ def normalize_event(payload: dict) -> dict | None:
         "chat_id": chat_id,
         "sender_id": str(msg.get("sender_id") or ""),
         "message_id": message_id,
+        "text": str(msg.get("text") or ""),
+        "button_id": str(aux.get("button_id") or ""),
+        "file": msg.get("file"),
+    }
+
+
+def _normalize_inline(msg: dict) -> dict:
+    aux = msg.get("aux_data") or {}
+    return {
+        "event_id": f"inline:{msg.get('chat_id')}:{msg.get('message_id')}:{aux.get('button_id')}",
+        "chat_id": str(msg.get("chat_id") or ""),
+        "sender_id": str(msg.get("sender_id") or ""),
+        "message_id": str(msg.get("message_id") or ""),
         "text": str(msg.get("text") or ""),
         "button_id": str(aux.get("button_id") or ""),
         "file": msg.get("file"),

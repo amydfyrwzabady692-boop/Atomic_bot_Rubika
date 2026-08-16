@@ -74,3 +74,37 @@ def inline(rows: list[list[tuple[str, str] | dict]]) -> dict:
     return {
         "rows": [{"buttons": [_build_button(item) for item in row]} for row in rows]
     }
+
+
+def inline_as_chat_keypad(inline_keypad: dict | None) -> dict | None:
+    """Copy glass buttons onto the bottom keypad so polling can receive taps.
+
+    Rubika delivers InlineKeypad clicks only to the ReceiveInlineMessage webhook.
+    ChatKeypad taps arrive as ordinary NewMessage updates via getUpdates.
+    """
+    if not isinstance(inline_keypad, dict):
+        return None
+    rows = []
+    for row in inline_keypad.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        buttons = []
+        for item in row.get("buttons") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "Simple") == "Link":
+                continue
+            button_id = str(item.get("id") or "").strip()
+            label = str(item.get("button_text") or "").strip()
+            if not button_id or not label:
+                continue
+            buttons.append(button(button_id, label))
+        if buttons:
+            rows.append({"buttons": buttons})
+    if not rows:
+        return None
+    return {
+        "rows": rows,
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }

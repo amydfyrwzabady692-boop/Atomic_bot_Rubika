@@ -11,6 +11,7 @@ from keyboards import (
     admin_menu,
     credential_staff_menu,
     inline,
+    inline_as_chat_keypad,
     keypad,
     link_button,
     main_menu,
@@ -69,7 +70,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         self.g2 = G2Bulk()
 
     async def send(self, chat_id, text, *, menu=None, buttons=None):
-        return await self.api.send_message(chat_id, text, chat_keypad=menu, inline_keypad=buttons)
+        if menu is None and buttons:
+            menu = inline_as_chat_keypad(buttons)
+        return await self.api.send_message(
+            chat_id, text, chat_keypad=menu, inline_keypad=buttons
+        )
 
     async def user_menu(self, rubika_id: str):
         # پنل مدیریت فقط برای مالک (RUBIKA_ADMIN_ID)، نه مدیران فرعی.
@@ -95,7 +100,7 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         if user["blocked"] and not await self.db.is_admin(event["sender_id"], self.config.admin_id):
             await self.send(event["chat_id"], "🚫 حساب شما مسدود است.")
             return
-        action = event["button_id"] or event["text"].strip()
+        action = (event["button_id"] or event["text"] or "").strip()
         _user_label_map = {
             "🎮 محصولات فری‌فایر": "gems",
             "💎 خرید جم": "gems",
@@ -113,7 +118,11 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "📚 راهنما": "help",
             "🆔 شناسه من": "myid",
             "🆔 جم با آیدی · تحویل لحظه‌ای": "gems_by_id",
+            "🆔 جم با آیدی": "gems_by_id",
+            "جم با آیدی": "gems_by_id",
+            "جم با ایدی": "gems_by_id",
             "🔐 جم با اطلاعات · هفتگی / ماهانه": "gems_credentials",
+            "🔐 جم با اطلاعات": "gems_credentials",
             "🏠 بازگشت": "home",
             "🔙 منوی اصلی": "home",
             "🔙 روش‌های خرید": "gems",
@@ -125,8 +134,19 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "🖥 PC": "sense_pc",
             "✏️ مبلغ دلخواه": "wallet_charge",
         }
-        if not event["button_id"]:
-            action = _user_label_map.get(action, action)
+
+        def _apply_label_map(mapping: dict, current: str) -> str:
+            for candidate in (
+                (event["button_id"] or "").strip(),
+                (event["text"] or "").strip(),
+                current,
+            ):
+                mapped = mapping.get(candidate)
+                if mapped:
+                    return mapped
+            return current
+
+        action = _apply_label_map(_user_label_map, action)
         # برخی کلاینت‌های روبیکا برای دکمه‌های chat_keypad فقط متن دکمه را
         # می‌فرستند نه button_id را؛ متن دکمه‌های منوی ادمین را به action درست تبدیل کن.
         _admin_label_map = {
@@ -173,11 +193,10 @@ class Router(CredentialHandlers, AdminFlowHandlers):
         is_owner = self.db.is_owner(event["sender_id"], self.config.admin_id)
         is_admin = await self.db.is_admin(event["sender_id"], self.config.admin_id)
         is_cred_staff = await self.ensure_credential_staff(event["sender_id"])
-        if not event["button_id"]:
-            if is_owner:
-                action = _admin_label_map.get(action, action)
-            elif is_cred_staff:
-                action = _cred_staff_label_map.get(action, action)
+        if is_owner:
+            action = _apply_label_map(_admin_label_map, action)
+        elif is_cred_staff:
+            action = _apply_label_map(_cred_staff_label_map, action)
         if action in {"/start", "شروع", "home", "🏠 منوی کاربر"}:
             await self.db.set_session(event["sender_id"])
             await self.start(event, user)
@@ -629,8 +648,27 @@ class Router(CredentialHandlers, AdminFlowHandlers):
             "join_request": lambda: self.join_request(event, user),
         }
         _menu_reset_actions = {
-            "home", "🏠 منوی کاربر", "/start", "شروع",
-            "help", "📚 راهنما", "myid", "🆔 شناسه من",
+            "home",
+            "🏠 منوی کاربر",
+            "/start",
+            "شروع",
+            "help",
+            "📚 راهنما",
+            "myid",
+            "🆔 شناسه من",
+            "gems",
+            "gems_by_id",
+            "gems_credentials",
+            "sense",
+            "sense_mobile",
+            "sense_pc",
+            "store",
+            "wallet",
+            "orders",
+            "account",
+            "support",
+            "promo",
+            "🎮 محصولات فری‌فایر",
         }
         active_state, active_data = await self.db.session(event["sender_id"])
         handler = routes.get(action)
